@@ -37,6 +37,7 @@ class QuoteRequest(BaseModel):
     description: str
     when: Optional[str] = None
     payment_type: Optional[str] = "fixhub"
+    documents: Optional[List[str]] = None
 
 class Quote(BaseModel):
     quote_id: str
@@ -68,23 +69,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Health check ---
+@app.post("/api/status")
+def status():
+    """Simple endpoint to verify the service is running."""
+    return {"status": "alive"}
+
 # --- Utils ---
-def make_prompt(q: QuoteRequest) -> list[dict]:
-    when_txt = q.when or "sin fecha definida"
-    pay_txt  = q.payment_type or "sin especificar"
-    system = ("Eres un asistente que genera presupuestos técnicos cortos y claros "
-              "para servicios de hogar/empresa en España. Devuelve SOLO JSON válido.")
-    user = (f"Cliente: {q.client.name} (NIF {q.client.nif}). "
-            f"Tipo: {q.client.type}. Dirección fiscal: {q.client.billingAddress}. "
-            f"Email: {q.client.email}. Tel: {q.client.phone}. "
-            f"Descripción: {q.description}. Fecha: {when_txt}. Pago: {pay_txt}. "
-            "Estructura deseada: items (concept, qty, unit, unit_price, subtotal), "
-            "tax_rate (entero %), subtotal, tax_total, total, schedule (ISO), terms, note. "
-            "No inventes importes irreales; usa números razonables.")
-    return [
-        {"role":"system", "content": system},
-        {"role":"user",   "content": user}
+def forward_to_openai(custom_message: str, payload: dict,
+                      documents: Optional[List[str]] = None,
+                      response_format: Optional[dict] = None):
+    """Forward data to OpenAI, logging the sent messages."""
+    messages = [
+        {"role": "system", "content": custom_message},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
     ]
+    if documents:
+        for path in documents:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    messages.append({"role": "user", "content": f.read()})
+            except Exception:
+                messages.append({"role": "user", "content": f"[Error leyendo {path}]"})
+    with open("last_openai_message.json", "w", encoding="utf-8") as f:
+        json.dump(messages, f, ensure_ascii=False, indent=2)
+    params = {"model": MODEL, "messages": messages}
+    if response_format:
+        params["response_format"] = response_format
+    return client.chat.completions.create(**params)
 
 def parse_json(s: str) -> dict:
     try:
@@ -96,18 +108,11 @@ def parse_json(s: str) -> dict:
 @app.post("/api/quotes/generate", response_model=Quote)
 def generate(q: QuoteRequest, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
-
-    # 1) Llamada a OpenAI con salida JSON (json_object)
-    # Docs oficiales: Chat Completions + JSON / Structured Outputs
-    # https://platform.openai.com/docs/api-reference/chat  (chat)
-    # https://platform.openai.com/docs/guides/structured-outputs (structured outputs)
-    completion = client.chat.completions.create(
-        model=MODEL,
-        response_format={"type":"json_object"},
-        messages=make_prompt(q)
-    )
-    content = completion.choices[0].message.content
-    data = parse_json(content)
+    custom_msg = ("Eres un asistente que genera presupuestos técnicos cortos y claros "
+                  "para servicios de hogar/empresa en España. Devuelve SOLO JSON válido.")
+    completion = forward_to_openai(custom_msg, q.model_dump(), q.documents,
+                                   response_format={"type": "json_object"})
+    data = parse_json(completion.choices[0].message.content)
 
     # Fallback / defaults
     items = [QuoteItem(**it) for it in data.get("items", [])]
@@ -152,6 +157,9 @@ def patch_quote(quote_id: str, body: PatchBody, x_api_key: Optional[str] = Heade
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
+
+    forward_to_openai("Actualiza un presupuesto con los campos proporcionados",
+                      {"quote_id": quote_id, **body.model_dump(exclude_unset=True)})
 
     # actualiza items
     if body.items:
@@ -232,6 +240,8 @@ def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
+
+    forward_to_openai("Genera un PDF para este presupuesto", q.model_dump())
 
     html = TPL.render(quote=q.model_dump())
     pdf_bytes = HTML(string=html).write_pdf()  # Docs: WeasyPrint
