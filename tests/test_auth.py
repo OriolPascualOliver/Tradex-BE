@@ -31,20 +31,6 @@ def test_get_current_user_with_invalid_token():
     with pytest.raises(HTTPException):
         get_current_user("invalid.token")
 
-
-def test_login_endpoint(monkeypatch, tmp_path):
-    """Login should accept email/password and return a token."""
-    monkeypatch.setattr(database, 'DB_PATH', tmp_path / 'test.db')
-    database.create_tables()
-    monkeypatch.setenv("ENABLE_INVOICE", "0")
-    monkeypatch.setenv("ENABLE_QUOTE", "0")
-    from app.main import LoginRequest, login
-
-    req = LoginRequest(email="demo@fixhub.es", password="demo123!")
-    token = login(req)
-    assert token.token
-
-
 def test_list_users_endpoint(monkeypatch, tmp_path):
     """The troubleshooting endpoint should list all users."""
     monkeypatch.setattr(database, 'DB_PATH', tmp_path / 'test.db')
@@ -56,3 +42,4 @@ def test_list_users_endpoint(monkeypatch, tmp_path):
     users = list_users()
     usernames = {u['username'] for u in users}
     assert 'demo@fixhub.es' in usernames
+

@@ -37,7 +37,7 @@ app.add_middleware(
 # Health check
 # ---------------------------------------------------------------------------
 @app.post("/api/status")
-def status():
+def health_status():
     """Simple endpoint to verify the service is running."""
     return {"status": "alive"}
 
@@ -71,10 +71,12 @@ if ENABLE_USER_AUTH:
         access_token = auth.create_access_token({"sub": data.email})
         return Token(token=access_token)
 
+
     @app.get("/api/auth/users")
     def list_users():
         """Return all users for troubleshooting purposes."""
         return database.get_all_users()
+
 
     @app.get("/secure-data")
     def read_secure_data(current_user: str = Depends(get_current_user)):
