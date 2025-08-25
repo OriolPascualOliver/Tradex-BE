@@ -7,7 +7,17 @@ from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
 
-from .dependencies import get_current_user
+# ---------------------------------------------------------------------------
+# Optional authentication dependency
+# ---------------------------------------------------------------------------
+ENABLE_USER_AUTH = os.getenv("ENABLE_USER_AUTH", "1") == "1"
+if ENABLE_USER_AUTH:
+    from .dependencies import get_current_user
+else:  # pragma: no cover - simple fallback for unauthenticated mode
+    def get_current_user():  # type: ignore[override]
+        """Fallback dependency when authentication is disabled."""
+        return "anonymous"
+
 from . import database
 
 # --- Seguridad simple (demo) ---
