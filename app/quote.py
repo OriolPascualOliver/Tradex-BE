@@ -60,6 +60,7 @@ DB: dict[str, Quote] = {}
 # --- OpenAI ---
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = os.getenv("MODEL_NAME", "gpt-4o-mini")  # ver doc oficial para modelos soportados
+PROMPT_FILE = os.path.join(os.path.dirname(__file__), "..", "aps", "prompt.txt")
 
 # --- Router ---
 router = APIRouter()
@@ -109,6 +110,15 @@ def generate(
 ):
     check_api_key(x_api_key)
 
+    try:
+        prompt_scope: dict[str, str] = {}
+        with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+            exec(f.read(), {}, prompt_scope)
+        custom_msg = prompt_scope.get("custom_msg", "")
+    except FileNotFoundError:
+        raise HTTPException(500, "Prompt configuration file not found")
+
+
     # Demo account limitations
     if current_user == "demo@fixhub.es":
         usage = database.get_device_usage(current_user, device_id)
@@ -125,6 +135,7 @@ def generate(
         database.increment_device_usage(current_user, device_id)
     custom_msg = ("Eres un asistente que genera presupuestos técnicos cortos y claros "
                   "para servicios de hogar/empresa en España. Devuelve SOLO JSON válido.")
+
     completion = forward_to_openai(custom_msg, q.model_dump(), q.documents,
                                    response_format={"type": "json_object"})
     data = parse_json(completion.choices[0].message.content)
