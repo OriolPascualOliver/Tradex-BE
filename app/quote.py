@@ -1,9 +1,8 @@
-from fastapi import FastAPI, HTTPException, Header, Response
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, HTTPException, Header, Response
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
-import os, io, json
+import os, json
 from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
@@ -59,18 +58,11 @@ DB: dict[str, Quote] = {}
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = os.getenv("MODEL_NAME", "gpt-4o-mini")  # ver doc oficial para modelos soportados
 
-# --- App ---
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # en prod: restringe dominios
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- Router ---
+router = APIRouter()
 
 # --- Health check ---
-@app.post("/api/status")
+@router.post("/api/status")
 def status():
     """Simple endpoint to verify the service is running."""
     return {"status": "alive"}
@@ -105,7 +97,7 @@ def parse_json(s: str) -> dict:
         raise HTTPException(502, f"Modelo devolvió JSON inválido: {e}")
 
 # --- Endpoints ---
-@app.post("/api/quotes/generate", response_model=Quote)
+@router.post("/api/quotes/generate", response_model=Quote)
 def generate(q: QuoteRequest, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
     custom_msg = ("Eres un asistente que genera presupuestos técnicos cortos y claros "
@@ -151,7 +143,7 @@ class PatchBody(BaseModel):
     terms: Optional[str] = None
     note: Optional[str] = None
 
-@app.patch("/api/quotes/{quote_id}", response_model=Quote)
+@router.patch("/api/quotes/{quote_id}", response_model=Quote)
 def patch_quote(quote_id: str, body: PatchBody, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
     if quote_id not in DB:
@@ -234,7 +226,7 @@ TPL = Environment(loader=BaseLoader()).from_string("""
 </html>
 """)
 
-@app.post("/api/quotes/{quote_id}/pdf")
+@router.post("/api/quotes/{quote_id}/pdf")
 def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
     if quote_id not in DB:
