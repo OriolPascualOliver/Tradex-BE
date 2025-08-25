@@ -11,6 +11,7 @@ ENABLE_QUOTE      - quote routes (default: "1")
 
 import os
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 
@@ -22,6 +23,14 @@ ENABLE_INVOICE = os.getenv("ENABLE_INVOICE", "1") == "1"
 ENABLE_QUOTE = os.getenv("ENABLE_QUOTE", "1") == "1"
 
 app = FastAPI(title="Tradex Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or specific frontend URLs
+    allow_credentials=True,
+    allow_methods=["*"],  # ensures OPTIONS is permitted
+    allow_headers=["*"],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +70,13 @@ if ENABLE_USER_AUTH:
         database.add_login(data.email, "web")
         access_token = auth.create_access_token({"sub": data.email})
         return Token(token=access_token)
+
+
+    @app.get("/api/auth/users")
+    def list_users():
+        """Return all users for troubleshooting purposes."""
+        return database.get_all_users()
+
 
     @app.get("/secure-data")
     def read_secure_data(current_user: str = Depends(get_current_user)):
