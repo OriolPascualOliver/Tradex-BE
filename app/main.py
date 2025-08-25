@@ -3,10 +3,14 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
 from . import auth, database
+from .invoice import router as invoice_router
+from .quote import router as quote_router
 
 app = FastAPI(title="Tradex Backend")
 
 database.create_tables()
+app.include_router(invoice_router, prefix="/facturas", tags=["facturas"])
+app.include_router(quote_router)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 

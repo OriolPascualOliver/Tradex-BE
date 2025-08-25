@@ -47,8 +47,10 @@ import hashlib
 from datetime import datetime, date
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+import smtplib
+from email.message import EmailMessage
 from pydantic import BaseModel, Field, validator
 
 from sqlalchemy import (
@@ -171,6 +173,8 @@ class InvoiceIn(BaseModel):
     emisor_nombre: str
     receptor_nif: str
     receptor_nombre: str
+
+    email: Optional[str] = None
 
     tipo: str = "F1"
 
@@ -347,6 +351,31 @@ def render_pdf(inv: Invoice, items: List[Item]) -> str:
     return path
 
 
+def send_email_with_pdf(pdf_path: str, recipient: str) -> None:
+    """Send the generated invoice PDF via SMTP."""
+    smtp_server = os.getenv("SMTP_SERVER", "localhost")
+    smtp_port = int(os.getenv("SMTP_PORT", "25"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    sender = os.getenv("SMTP_SENDER", smtp_user or "no-reply@example.com")
+
+    with open(pdf_path, "rb") as f:
+        data = f.read()
+
+    msg = EmailMessage()
+    msg["Subject"] = "Factura"
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg.set_content("Adjuntamos su factura en PDF.")
+    msg.add_attachment(data, maintype="application", subtype="pdf", filename=os.path.basename(pdf_path))
+
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        if smtp_user and smtp_password:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+        server.send_message(msg)
+
+
 def build_xml_registro(payload: dict, digest_hex: str) -> bytes:
     """Construye un XML mínimo del registro de alta.
 
@@ -385,12 +414,12 @@ def send_to_aeat(wsdl_url: str, signed_xml: bytes) -> dict:
 
 
 # -----------------------------------------------------------------------------
-# FastAPI
+# Router
 # -----------------------------------------------------------------------------
-app = FastAPI(title="VERI*FACTU MVP", version="0.1.0")
+router = APIRouter()
 
 
-@app.post("/facturas", response_model=InvoiceOut)
+@router.post("/", response_model=InvoiceOut)
 def crear_factura(datos: InvoiceIn):
     with SessionLocal() as db:
         numero = datos.numero or next_number(db, datos.serie)
@@ -445,6 +474,12 @@ def crear_factura(datos: InvoiceIn):
         inv.qr_path = generar_qr(inv)
         inv.pdf_path = render_pdf(inv, inv.items)
 
+        if datos.email:
+            try:
+                send_email_with_pdf(inv.pdf_path, datos.email)
+            except Exception:
+                pass
+
         # XML, firma y (opcional) envío
         xml_reg = build_xml_registro(payload, digest)
         xml_signed = sign_xades(xml_reg, CERT_PATH, CERT_PASS)
@@ -474,7 +509,7 @@ def crear_factura(datos: InvoiceIn):
         return out
 
 
-@app.get("/facturas/{factura_id}", response_model=InvoiceOut)
+@router.get("/{factura_id}", response_model=InvoiceOut)
 def obtener_factura(factura_id: int):
     with SessionLocal() as db:
         inv = db.get(Invoice, factura_id)
@@ -498,7 +533,7 @@ def obtener_factura(factura_id: int):
         )
 
 
-@app.get("/facturas/{factura_id}/pdf")
+@router.get("/{factura_id}/pdf")
 def descargar_pdf(factura_id: int):
     with SessionLocal() as db:
         inv = db.get(Invoice, factura_id)
@@ -507,18 +542,10 @@ def descargar_pdf(factura_id: int):
         return FileResponse(inv.pdf_path, media_type="application/pdf", filename=os.path.basename(inv.pdf_path))
 
 
-@app.get("/facturas/{factura_id}/qr")
+@router.get("/{factura_id}/qr")
 def descargar_qr(factura_id: int):
     with SessionLocal() as db:
         inv = db.get(Invoice, factura_id)
         if not inv or not inv.qr_path or not os.path.exists(inv.qr_path):
             raise HTTPException(status_code=404, detail="QR no disponible")
         return FileResponse(inv.qr_path, media_type="image/png", filename=os.path.basename(inv.qr_path))
-
-
-# -----------------------------------------------------------------------------
-# Datos de ejemplo rápidos (para pruebas con curl)
-# -----------------------------------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
