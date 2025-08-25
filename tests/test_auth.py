@@ -43,3 +43,16 @@ def test_login_endpoint(monkeypatch, tmp_path):
     req = LoginRequest(email="demo@fixhub.es", password="demo123!")
     token = login(req)
     assert token.token
+
+
+def test_list_users_endpoint(monkeypatch, tmp_path):
+    """The troubleshooting endpoint should list all users."""
+    monkeypatch.setattr(database, 'DB_PATH', tmp_path / 'test.db')
+    database.create_tables()
+    monkeypatch.setenv("ENABLE_INVOICE", "0")
+    monkeypatch.setenv("ENABLE_QUOTE", "0")
+    from app.main import list_users
+
+    users = list_users()
+    usernames = {u['username'] for u in users}
+    assert 'demo@fixhub.es' in usernames
