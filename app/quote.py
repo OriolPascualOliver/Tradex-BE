@@ -1,11 +1,14 @@
-from fastapi import APIRouter, HTTPException, Header, Response
+from fastapi import APIRouter, HTTPException, Header, Response, Depends
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import os, json
 from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
+
+from .dependencies import get_current_user
+from . import database
 
 # --- Seguridad simple (demo) ---
 EXPECTED_API_KEY = os.getenv("API_KEY")
@@ -98,8 +101,28 @@ def parse_json(s: str) -> dict:
 
 # --- Endpoints ---
 @router.post("/api/quotes/generate", response_model=Quote)
-def generate(q: QuoteRequest, x_api_key: Optional[str] = Header(None)):
+def generate(
+    q: QuoteRequest,
+    x_api_key: Optional[str] = Header(None),
+    device_id: str = Header(..., alias="X-Device-Id"),
+    current_user: str = Depends(get_current_user),
+):
     check_api_key(x_api_key)
+
+    # Demo account limitations
+    if current_user == "demo@fixhub.es":
+        usage = database.get_device_usage(current_user, device_id)
+        if usage and usage["quote_count"] >= 3:
+            raise HTTPException(403, "Quote limit reached for this device")
+        database.increment_device_usage(current_user, device_id)
+    elif current_user == "demo2@fixhub.es":
+        usage = database.get_device_usage(current_user, device_id)
+        limit_min = int(os.getenv("DEMO2_TIME_LIMIT_MINUTES", "60"))
+        if usage:
+            first_access = datetime.strptime(usage["first_access"], "%Y-%m-%d %H:%M:%S")
+            if datetime.utcnow() - first_access > timedelta(minutes=limit_min):
+                raise HTTPException(403, "Demo period expired for this device")
+        database.increment_device_usage(current_user, device_id)
     custom_msg = ("Eres un asistente que genera presupuestos técnicos cortos y claros "
                   "para servicios de hogar/empresa en España. Devuelve SOLO JSON válido.")
     completion = forward_to_openai(custom_msg, q.model_dump(), q.documents,
