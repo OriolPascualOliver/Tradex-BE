@@ -1,18 +1,16 @@
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
 from . import auth, database
 from .invoice import router as invoice_router
 from .quote import router as quote_router
+from .dependencies import get_current_user
 
 app = FastAPI(title="Tradex Backend")
 
 database.create_tables()
 app.include_router(invoice_router, prefix="/facturas", tags=["facturas"])
 app.include_router(quote_router)
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
 class LoginRequest(BaseModel):
@@ -37,25 +35,6 @@ def login(data: LoginRequest):
     database.add_login(data.username, data.device_id)
     access_token = auth.create_access_token({"sub": data.username})
     return Token(access_token=access_token)
-
-
-def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
-    payload = auth.decode_access_token(token)
-    if payload is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
-        )
-    username = payload.get("sub")
-    if username is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
-        )
-    user = database.get_user(username)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found"
-        )
-    return username
 
 
 @app.get("/secure-data")

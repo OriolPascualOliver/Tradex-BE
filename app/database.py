@@ -2,6 +2,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from .auth import get_password_hash
+
 DB_PATH = Path(__file__).resolve().parent / "users.db"
 
 
@@ -13,7 +15,7 @@ def get_connection():
 
 
 def create_tables() -> None:
-    """Create required tables if they do not already exist."""
+    """Create required tables if they do not already exist and seed demo users."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
@@ -34,6 +36,31 @@ def create_tables() -> None:
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_usage (
+            username TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            quote_count INTEGER DEFAULT 0,
+            first_access TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (username, device_id)
+        )
+        """
+    )
+
+    # Seed demo accounts if missing
+    demo_users = [
+        ("demo@fixhub.es", "demo123!"),
+        ("demo2@fixhub.es", "demo456!"),
+    ]
+    for username, password in demo_users:
+        cur.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+        if cur.fetchone() is None:
+            cur.execute(
+                "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
+                (username, get_password_hash(password)),
+            )
+
     conn.commit()
     conn.close()
 
@@ -52,6 +79,34 @@ def add_login(username: str, device_id: str) -> None:
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO logins (username, device_id) VALUES (?, ?)",
+        (username, device_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_device_usage(username: str, device_id: str) -> Optional[sqlite3.Row]:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM device_usage WHERE username = ? AND device_id = ?",
+        (username, device_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def increment_device_usage(username: str, device_id: str) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO device_usage (username, device_id, quote_count)
+        VALUES (?, ?, 1)
+        ON CONFLICT(username, device_id)
+        DO UPDATE SET quote_count = quote_count + 1
+        """,
         (username, device_id),
     )
     conn.commit()
