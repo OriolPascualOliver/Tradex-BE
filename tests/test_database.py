@@ -13,6 +13,14 @@ def test_create_tables_seeds_demo_users(tmp_path, monkeypatch):
     assert user['username'] == 'demo@fixhub.es'
 
 
+def test_get_all_users_returns_seeded_accounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, 'DB_PATH', tmp_path / 'test.db')
+    database.create_tables()
+    users = database.get_all_users()
+    usernames = {u['username'] for u in users}
+    assert {'demo@fixhub.es', 'demo2@fixhub.es'} <= usernames
+
+
 def test_increment_device_usage(tmp_path, monkeypatch):
     monkeypatch.setattr(database, 'DB_PATH', tmp_path / 'test.db')
     database.create_tables()

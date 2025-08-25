@@ -74,6 +74,16 @@ def get_user(username: str) -> Optional[sqlite3.Row]:
     return user
 
 
+def get_all_users() -> list[dict]:
+    """Return all user records as a list of dictionaries."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users")
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def add_login(username: str, device_id: str) -> None:
     conn = get_connection()
     cur = conn.cursor()
