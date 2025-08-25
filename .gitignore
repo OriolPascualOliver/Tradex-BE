@@ -1,2 +1,3 @@
 __pycache__/
-last_openai_message.json
+*.pyc
+app/users.db
