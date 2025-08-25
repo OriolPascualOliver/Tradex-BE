@@ -32,13 +32,22 @@ def main() -> None:
     hashed = auth.get_password_hash(password)
     conn = database.get_connection()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
-        (username, hashed),
-    )
+    cur.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+    exists = cur.fetchone() is not None
+    if exists:
+        cur.execute(
+            "UPDATE users SET hashed_password = ? WHERE username = ?",
+            (hashed, username),
+        )
+        print(f"Password for {username} updated")
+    else:
+        cur.execute(
+            "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
+            (username, hashed),
+        )
+        print(f"User {username} added")
     conn.commit()
     conn.close()
-    print(f"User {username} added")
 
 
 if __name__ == "__main__":
