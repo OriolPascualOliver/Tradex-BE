@@ -4,7 +4,11 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-SECRET_KEY = "change-me"  # In production, load from environment
+import os
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY environment variable not set. Please set it for production use.")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
