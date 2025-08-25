@@ -25,6 +25,15 @@ app = FastAPI(title="Tradex Backend")
 
 
 # ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+@app.post("/api/status")
+def status():
+    """Simple endpoint to verify the service is running."""
+    return {"status": "alive"}
+
+
+# ---------------------------------------------------------------------------
 # Optional: user database and authentication
 # ---------------------------------------------------------------------------
 if ENABLE_USER_AUTH:

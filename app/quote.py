@@ -75,12 +75,6 @@ PROMPT_FILE = os.path.join(os.path.dirname(__file__), "..", "aps", "prompt.txt")
 # --- Router ---
 router = APIRouter()
 
-# --- Health check ---
-@router.post("/api/status")
-def status():
-    """Simple endpoint to verify the service is running."""
-    return {"status": "alive"}
-
 # --- Utils ---
 def forward_to_openai(custom_message: str, payload: dict,
                       documents: Optional[List[str]] = None,
