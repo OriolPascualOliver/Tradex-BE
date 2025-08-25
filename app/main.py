@@ -43,25 +43,24 @@ if ENABLE_USER_AUTH:
     database.create_tables()
 
     class LoginRequest(BaseModel):
-        username: str
+        email: str
         password: str
-        device_id: str
 
     class Token(BaseModel):
-        access_token: str
-        token_type: str = "bearer"
+        token: str
 
-    @app.post("/login", response_model=Token)
+    @app.post("/api/auth/login", response_model=Token)
     def login(data: LoginRequest):
-        user = database.get_user(data.username)
+        user = database.get_user(data.email)
         if not user or not auth.verify_password(data.password, user["hashed_password"]):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
             )
-        database.add_login(data.username, data.device_id)
-        access_token = auth.create_access_token({"sub": data.username})
-        return Token(access_token=access_token)
+        # Record the login with a generic device identifier
+        database.add_login(data.email, "web")
+        access_token = auth.create_access_token({"sub": data.email})
+        return Token(token=access_token)
 
     @app.get("/secure-data")
     def read_secure_data(current_user: str = Depends(get_current_user)):
