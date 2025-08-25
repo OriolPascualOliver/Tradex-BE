@@ -133,8 +133,6 @@ def generate(
             if datetime.utcnow() - first_access > timedelta(minutes=limit_min):
                 raise HTTPException(403, "Demo period expired for this device")
         database.increment_device_usage(current_user, device_id)
-    custom_msg = ("Eres un asistente que genera presupuestos técnicos cortos y claros "
-                  "para servicios de hogar/empresa en España. Devuelve SOLO JSON válido.")
 
     completion = forward_to_openai(custom_msg, q.model_dump(), q.documents,
                                    response_format={"type": "json_object"})
