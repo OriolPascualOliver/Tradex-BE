@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Header, Response, Depends
+from fastapi import APIRouter, HTTPException, Header, Response, Depends, Request
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, timedelta
@@ -108,6 +108,7 @@ def parse_json(s: str) -> dict:
 @router.post("/api/quotes/generate", response_model=Quote)
 def generate(
     q: QuoteRequest,
+    request: Request,
     x_api_key: Optional[str] = Header(None),
     device_id: str = Header(..., alias="X-Device-Id"),
     current_user: str = Depends(get_current_user),
@@ -163,6 +164,15 @@ def generate(
         raw_text=data.get("raw_text","")
     )
     DB[quote.quote_id] = quote
+    database.add_audit_log(
+        actor=current_user,
+        ip=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent", ""),
+        action="create",
+        obj=f"quote:{quote.quote_id}",
+        before=None,
+        after=quote.model_dump(),
+    )
     return quote
 
 class PatchItem(BaseModel):
@@ -180,11 +190,18 @@ class PatchBody(BaseModel):
     note: Optional[str] = None
 
 @router.patch("/api/quotes/{quote_id}", response_model=Quote)
-def patch_quote(quote_id: str, body: PatchBody, x_api_key: Optional[str] = Header(None)):
+def patch_quote(
+    quote_id: str,
+    body: PatchBody,
+    request: Request,
+    x_api_key: Optional[str] = Header(None),
+    current_user: str = Depends(get_current_user),
+):
     check_api_key(x_api_key)
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
+    before = q.model_dump()
 
     forward_to_openai("Actualiza un presupuesto con los campos proporcionados",
                       {"quote_id": quote_id, **body.model_dump(exclude_unset=True)})
@@ -215,6 +232,15 @@ def patch_quote(quote_id: str, body: PatchBody, x_api_key: Optional[str] = Heade
     q.total     = round(q.subtotal + q.tax_total, 2)
 
     DB[quote_id] = q
+    database.add_audit_log(
+        actor=current_user,
+        ip=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent", ""),
+        action="update",
+        obj=f"quote:{quote_id}",
+        before=before,
+        after=q.model_dump(),
+    )
     return q
 
 # plantilla HTML para el PDF (demo)

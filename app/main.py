@@ -10,9 +10,11 @@ ENABLE_QUOTE      - quote routes (default: "0")
 """
 
 import os
+
 import secrets
 import logging
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -139,11 +141,12 @@ def health_status(current_user: str = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 if ENABLE_USER_AUTH:
 
-    from . import auth, database
+    from . import auth, database, audit
     from .dependencies import get_current_user, oauth2_scheme
 
 
     database.create_tables()
+    app.include_router(audit.router)
 
     class LoginRequest(BaseModel):
         email: str
@@ -219,7 +222,16 @@ if ENABLE_USER_AUTH:
         return database.get_all_users()
 
     @app.get("/secure-data")
-    def read_secure_data(current_user: str = Depends(get_current_user)):
+    def read_secure_data(request: Request, current_user: str = Depends(get_current_user)):
+        database.add_audit_log(
+            actor=current_user,
+            ip=request.client.host if request.client else "",
+            user_agent=request.headers.get("user-agent", ""),
+            action="access",
+            obj="/secure-data",
+            before=None,
+            after=None,
+        )
         return {"user": current_user, "message": "Secure content"}
 else:  # pragma: no cover - runtime check
     def get_current_user():  # type: ignore[override]
