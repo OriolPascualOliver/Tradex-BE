@@ -68,6 +68,7 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 import qrcode
 from weasyprint import HTML
+from .observability import inc_invoice_verification
 from lxml import etree
 
 # -----------------------------------------------------------------------------
@@ -549,3 +550,17 @@ def descargar_qr(factura_id: int):
         if not inv or not inv.qr_path or not os.path.exists(inv.qr_path):
             raise HTTPException(status_code=404, detail="QR no disponible")
         return FileResponse(inv.qr_path, media_type="image/png", filename=os.path.basename(inv.qr_path))
+
+
+@router.get("/{factura_id}/verify")
+def verificar_factura(factura_id: int):
+    """Recalculate hash to verify invoice integrity."""
+    with SessionLocal() as db:
+        inv = db.get(Invoice, factura_id)
+        if not inv:
+            raise HTTPException(status_code=404, detail="Factura no encontrada")
+        data = f"{inv.serie}{inv.numero}{inv.fecha}{inv.emisor_nif}{inv.receptor_nif}{inv.total}"
+        digest = hashlib.sha256(data.encode()).hexdigest()
+        verified = inv.hash_actual == digest
+        inc_invoice_verification()
+        return {"verified": verified}

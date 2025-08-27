@@ -6,6 +6,7 @@ import os, json
 from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
+from .observability import inc_openai_request
 
 # ---------------------------------------------------------------------------
 # Optional authentication dependency
@@ -96,6 +97,7 @@ def forward_to_openai(custom_message: str, payload: dict,
     params = {"model": MODEL, "messages": messages}
     if response_format:
         params["response_format"] = response_format
+    inc_openai_request()
     return client.chat.completions.create(**params)
 
 def parse_json(s: str) -> dict:

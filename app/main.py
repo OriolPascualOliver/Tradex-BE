@@ -10,9 +10,21 @@ ENABLE_QUOTE      - quote routes (default: "1")
 """
 
 import os
-from fastapi import Depends, FastAPI, HTTPException, status
+import uuid
+from fastapi import Depends, FastAPI, HTTPException, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from .observability import (
+    CONTENT_TYPE_LATEST,
+    correlation_id_ctx,
+    generate_metrics,
+    inc_http_403,
+    inc_http_429,
+    inc_login_failure,
+    logger,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -23,6 +35,30 @@ ENABLE_INVOICE = os.getenv("ENABLE_INVOICE", "1") == "1"
 ENABLE_QUOTE = os.getenv("ENABLE_QUOTE", "1") == "1"
 
 app = FastAPI(title="Tradex Backend")
+
+
+class ObservabilityMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+        correlation_id_ctx.set(correlation_id)
+        response = await call_next(request)
+        response.headers["X-Correlation-ID"] = correlation_id
+        if response.status_code == status.HTTP_403_FORBIDDEN:
+            inc_http_403()
+        elif response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            inc_http_429()
+        logger.info(
+            "request",
+            extra={
+                "method": request.method,
+                "path": str(request.url.path),
+                "status_code": response.status_code,
+            },
+        )
+        return response
+
+
+app.add_middleware(ObservabilityMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,6 +76,12 @@ app.add_middleware(
 def health_status():
     """Simple endpoint to verify the service is running."""
     return {"status": "alive"}
+
+
+@app.get("/metrics")
+def metrics():
+    """Expose Prometheus metrics."""
+    return Response(generate_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +104,7 @@ if ENABLE_USER_AUTH:
     def login(data: LoginRequest):
         user = database.get_user(data.email)
         if not user or not auth.verify_password(data.password, user["hashed_password"]):
+            inc_login_failure()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
