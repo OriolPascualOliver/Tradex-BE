@@ -89,7 +89,7 @@ if ENABLE_USER_AUTH:
 if ENABLE_INVOICE:
     from .invoice import router as invoice_router
 
-    app.include_router(invoice_router, prefix="/facturas", tags=["facturas"])
+    app.include_router(invoice_router, prefix="/api/invoices", tags=["invoices"])
 
 if ENABLE_QUOTE:
     from .quote import router as quote_router
