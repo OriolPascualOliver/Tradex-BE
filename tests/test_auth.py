@@ -1,10 +1,12 @@
 import sys, pathlib, os
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 
+import os
 import pytest
 from fastapi import HTTPException
 
 os.environ.setdefault("SECRET_KEY", "testing")
+
 from app import auth, database
 from app.dependencies import get_current_user
 
@@ -21,7 +23,8 @@ def test_create_and_decode_access_token():
     assert decoded["sub"] == "user@example.com"
 
 
-def test_get_current_user_with_valid_token():
+def test_get_current_user_with_valid_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, 'DB_PATH', tmp_path / 'test.db')
     database.create_tables()
     token = auth.create_access_token({"sub": "demo@fixhub.es"})
     user = get_current_user(token)
