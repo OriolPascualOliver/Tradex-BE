@@ -7,6 +7,8 @@ from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
 
+from .security import run_isolated, sanitize_filename, content_disposition
+
 # ---------------------------------------------------------------------------
 # Optional authentication dependency
 # ---------------------------------------------------------------------------
@@ -291,6 +293,7 @@ TPL = Environment(loader=BaseLoader()).from_string("""
 @router.post("/api/quotes/{quote_id}/pdf")
 def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
+    sanitize_filename(quote_id)
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
@@ -298,14 +301,18 @@ def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     forward_to_openai("Genera un PDF para este presupuesto", q.model_dump())
 
     html = TPL.render(quote=q.model_dump())
-    pdf_bytes = HTML(string=html).write_pdf()  # Docs: WeasyPrint
-    # Opción B: enviar al webhook de Fixhub si está configurado
+
+    def _render() -> bytes:
+        return HTML(string=html).write_pdf()  # Docs: WeasyPrint
+
+    try:
+        pdf_bytes = run_isolated(_render)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="PDF generation timed out")
+
     webhook = os.getenv("FIXHUB_WEBHOOK_URL", "").strip()
     if webhook:
-        # Aquí harías requests.post(webhook, files={"file":("presupuesto.pdf", pdf_bytes, "application/pdf")}, data={...})
-        # Para demo devolvemos status
-        return {"status":"sent", "bytes": len(pdf_bytes)}
+        return {"status": "sent", "bytes": len(pdf_bytes)}
 
-    # Opción A: devolver binario al frontend
-    return Response(content=pdf_bytes, media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="{quote_id}.pdf"'})
+    headers = content_disposition(f"{quote_id}.pdf")
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)

@@ -68,6 +68,8 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 import qrcode
 from weasyprint import HTML
+
+from .security import hashed_path, run_isolated, content_disposition
 from lxml import etree
 
 # -----------------------------------------------------------------------------
@@ -246,11 +248,30 @@ def build_registro_alta(inv: Invoice, prev_hash: Optional[str], fecha_hora: Opti
 
 
 def generar_qr(inv: Invoice) -> str:
-    """Genera el PNG del QR con la URL de verificación."""
-    url = f"{VERIFY_URL_BASE}/api/invoices/{inv.id}/verify?hash={inv.hash_actual}"
-    path = os.path.join(OUTPUT_DIR, f"qr_{inv.serie}_{inv.numero}.png")
-    img = qrcode.make(url)
-    img.save(path)
+
+    """Genera el PNG del QR con la URL de cotejo.
+
+    IMPORTANTE: Los parámetros exactos (nombres/orden/formato) los dicta el doc
+    "Características del QR y especificaciones del servicio de cotejo". Aquí usamos
+    parámetros genéricos como ejemplo.
+    """
+    url = (
+        f"{AEAT_QR_BASE_URL}?nif={inv.emisor_nif}"
+        f"&serie={inv.serie}&num={inv.numero}"
+        f"&fecha={inv.fecha.isoformat()}&total={inv.total:.2f}"
+    )
+    identifier = f"{inv.serie}_{inv.numero}"
+    path = hashed_path(identifier, "qr", "png", OUTPUT_DIR)
+
+    def _render() -> None:
+        img = qrcode.make(url)
+        img.save(path)
+
+    try:
+        run_isolated(_render)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="QR generation timed out")
+
     return path
 
 
@@ -337,10 +358,20 @@ def html_factura(inv: Invoice, items: List[Item], timestamp: str) -> str:
 """
 
 
-def render_pdf(inv: Invoice, items: List[Item], timestamp: str) -> str:
-    html = html_factura(inv, items, timestamp)
-    path = os.path.join(OUTPUT_DIR, f"factura_{inv.serie}_{inv.numero}.pdf")
-    HTML(string=html, base_url=os.getcwd()).write_pdf(path)
+
+def render_pdf(inv: Invoice, items: List[Item]) -> str:
+    html = html_factura(inv, items)
+    identifier = f"{inv.serie}_{inv.numero}"
+    path = hashed_path(identifier, "factura", "pdf", OUTPUT_DIR)
+
+    def _render() -> None:
+        HTML(string=html, base_url=os.getcwd()).write_pdf(path)
+
+    try:
+        run_isolated(_render)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="PDF generation timed out")
+
     return path
 
 
@@ -532,7 +563,9 @@ def descargar_pdf(factura_id: int):
         inv = db.get(Invoice, factura_id)
         if not inv or not inv.pdf_path or not os.path.exists(inv.pdf_path):
             raise HTTPException(status_code=404, detail="PDF no disponible")
-        return FileResponse(inv.pdf_path, media_type="application/pdf", filename=os.path.basename(inv.pdf_path))
+        fname = os.path.basename(inv.pdf_path)
+        headers = content_disposition(fname)
+        return FileResponse(inv.pdf_path, media_type="application/pdf", headers=headers)
 
 
 @router.get("/{factura_id}/qr")
@@ -541,6 +574,11 @@ def descargar_qr(factura_id: int):
         inv = db.get(Invoice, factura_id)
         if not inv or not inv.qr_path or not os.path.exists(inv.qr_path):
             raise HTTPException(status_code=404, detail="QR no disponible")
+
+        fname = os.path.basename(inv.qr_path)
+        headers = content_disposition(fname)
+   
+
         return FileResponse(inv.qr_path, media_type="image/png", filename=os.path.basename(inv.qr_path))
 
 @router.get("/{factura_id}/verify")
@@ -560,3 +598,4 @@ def verificar_factura(factura_id: int, hash: Optional[str] = None):
                 return {"status": "valida"}
             prev_hash = led.hash_actual
     raise HTTPException(status_code=404, detail="Factura no encontrada")
+
