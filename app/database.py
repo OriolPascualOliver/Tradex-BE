@@ -1,10 +1,17 @@
 import sqlite3
+import json
+import copy
+import os
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, Dict, List
 
 from .auth import get_password_hash
 
 DB_PATH = Path(__file__).resolve().parent / "users.db"
+
+# Retention policy for audit logs (days)
+RETENTION_DAYS = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "30"))
 
 
 def get_connection():
@@ -44,6 +51,21 @@ def create_tables() -> None:
             quote_count INTEGER DEFAULT 0,
             first_access TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (username, device_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            actor TEXT,
+            ip TEXT,
+            user_agent TEXT,
+            action TEXT,
+            object TEXT,
+            before TEXT,
+            after TEXT
         )
         """
     )
@@ -121,3 +143,129 @@ def increment_device_usage(username: str, device_id: str) -> None:
     )
     conn.commit()
     conn.close()
+
+
+SENSITIVE_KEYS = {
+    "password",
+    "hashed_password",
+    "email",
+    "nif",
+    "receptor_nif",
+    "emisor_nif",
+    "username",
+    "phone",
+}
+
+
+def redact_pii(data: Optional[Any]) -> Optional[Any]:
+    """Return a deep copy of *data* with sensitive fields redacted."""
+    if data is None:
+        return None
+
+    def _redact(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            result: Dict[str, Any] = {}
+            for k, v in obj.items():
+                if k.lower() in SENSITIVE_KEYS:
+                    result[k] = "[REDACTED]"
+                else:
+                    result[k] = _redact(v)
+            return result
+        if isinstance(obj, list):
+            return [_redact(v) for v in obj]
+        return obj
+
+    return _redact(copy.deepcopy(data))
+
+
+def add_audit_log(
+    actor: str,
+    ip: str,
+    user_agent: str,
+    action: str,
+    obj: str,
+    before: Optional[Dict[str, Any]] = None,
+    after: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Insert a record into the audit log and enforce retention."""
+    before_json = json.dumps(redact_pii(before), ensure_ascii=False) if before is not None else None
+    after_json = json.dumps(redact_pii(after), ensure_ascii=False) if after is not None else None
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO audit_log (actor, ip, user_agent, action, object, before, after)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (actor, ip, user_agent, action, obj, before_json, after_json),
+    )
+    cur.execute(
+        "DELETE FROM audit_log WHERE timestamp < datetime('now', ?)",
+        (f'-{RETENTION_DAYS} days',),
+    )
+    conn.commit()
+    conn.close()
+
+
+def query_audit_logs(
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    user: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return audit log entries filtered by optional range and user."""
+    conn = get_connection()
+    cur = conn.cursor()
+    query = "SELECT * FROM audit_log WHERE 1=1"
+    params: List[Any] = []
+    if user:
+        query += " AND actor = ?"
+        params.append(user)
+    if start:
+        query += " AND timestamp >= ?"
+        params.append(start.isoformat(sep=" "))
+    if end:
+        query += " AND timestamp <= ?"
+        params.append(end.isoformat(sep=" "))
+    cur.execute(query + " ORDER BY id", params)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def export_audit_logs_csv(
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    user: Optional[str] = None,
+) -> str:
+    """Return audit logs as a CSV string with basic CSV injection protection."""
+    import csv
+    import io
+
+    logs = query_audit_logs(start, end, user)
+    output = io.StringIO()
+    fieldnames = [
+        "id",
+        "timestamp",
+        "actor",
+        "ip",
+        "user_agent",
+        "action",
+        "object",
+        "before",
+        "after",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
+    def sanitize(value: Optional[str]) -> str:
+        if value is None:
+            return ""
+        if value and value[0] in ("=", "+", "-", "@"):  # CSV injection guard
+            return "'" + value
+        return value
+
+    for row in logs:
+        writer.writerow({k: sanitize(str(row.get(k, ""))) for k in fieldnames})
+
+    return output.getvalue()
+
