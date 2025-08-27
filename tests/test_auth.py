@@ -1,9 +1,10 @@
-import sys, pathlib
+import sys, pathlib, os
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 
 import pytest
 from fastapi import HTTPException
 
+os.environ.setdefault("SECRET_KEY", "testing")
 from app import auth, database
 from app.dependencies import get_current_user
 
@@ -37,6 +38,9 @@ def test_list_users_endpoint(monkeypatch, tmp_path):
     database.create_tables()
     monkeypatch.setenv("ENABLE_INVOICE", "0")
     monkeypatch.setenv("ENABLE_QUOTE", "0")
+    monkeypatch.setenv("ENABLE_USER_AUTH", "1")
+    import importlib, app.main
+    importlib.reload(app.main)
     from app.main import list_users
 
     users = list_users()
