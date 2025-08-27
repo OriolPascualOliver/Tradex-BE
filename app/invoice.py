@@ -79,6 +79,7 @@ VERIFACTU_ENVIAR = os.getenv("VERIFACTU_ENVIAR", "0") == "1"
 CERT_PATH = os.getenv("CERT_PATH")
 CERT_PASS = os.getenv("CERT_PASS")
 AEAT_WSDL_URL = os.getenv("AEAT_WSDL_URL")
+VERIFY_URL_BASE = os.getenv("VERIFY_URL_BASE", "http://localhost:8000")
 
 # Salidas
 OUTPUT_DIR = os.path.abspath(os.getenv("OUTPUT_DIR", "./salida"))
@@ -225,7 +226,7 @@ def calc_totals(items: List[ItemIn], tipo_iva: float) -> tuple[float, float, flo
 # (campos, orden, normalización y codificación) en:
 # "Algoritmo de cálculo de codificación de la huella o hash".
 
-def build_registro_alta(inv: Invoice, prev_hash: Optional[str]):
+def build_registro_alta(inv: Invoice, prev_hash: Optional[str], fecha_hora: Optional[str] = None):
     payload = {
         "NIFEmisor": inv.emisor_nif,
         "SerieFactura": inv.serie,
@@ -236,7 +237,7 @@ def build_registro_alta(inv: Invoice, prev_hash: Optional[str]):
         "CuotaTotal": f"{inv.cuota_iva:.2f}",
         "ImporteTotal": f"{inv.total:.2f}",
         "HuellaAnterior": prev_hash or "",
-        "FechaHoraGeneracion": datetime.now().isoformat(timespec="seconds"),
+        "FechaHoraGeneracion": fecha_hora or datetime.now().isoformat(timespec="seconds"),
     }
     # Canonicalización simple → ajusta a la especificación oficial
     canon = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -245,24 +246,15 @@ def build_registro_alta(inv: Invoice, prev_hash: Optional[str]):
 
 
 def generar_qr(inv: Invoice) -> str:
-    """Genera el PNG del QR con la URL de cotejo.
-
-    IMPORTANTE: Los parámetros exactos (nombres/orden/formato) los dicta el doc
-    "Características del QR y especificaciones del servicio de cotejo". Aquí usamos
-    parámetros genéricos como ejemplo.
-    """
-    url = (
-        f"{AEAT_QR_BASE_URL}?nif={inv.emisor_nif}"
-        f"&serie={inv.serie}&num={inv.numero}"
-        f"&fecha={inv.fecha.isoformat()}&total={inv.total:.2f}"
-    )
+    """Genera el PNG del QR con la URL de verificación."""
+    url = f"{VERIFY_URL_BASE}/api/invoices/{inv.id}/verify?hash={inv.hash_actual}"
     path = os.path.join(OUTPUT_DIR, f"qr_{inv.serie}_{inv.numero}.png")
     img = qrcode.make(url)
     img.save(path)
     return path
 
 
-def html_factura(inv: Invoice, items: List[Item]) -> str:
+def html_factura(inv: Invoice, items: List[Item], timestamp: str) -> str:
     filas = "".join(
         f"<tr><td>{it.descripcion}</td><td style='text-align:right'>{it.cantidad:.2f}</td>"
         f"<td style='text-align:right'>{it.precio_unitario:.2f}</td>"
@@ -337,15 +329,16 @@ def html_factura(inv: Invoice, items: List[Item]) -> str:
   </div>
 
   <div class="small" style="margin-top:8px;">
-    Huella (hash) actual: {inv.hash_actual or ''}
+    Huella (hash) actual: {inv.hash_actual or ""}<br/>
+    Sello temporal: {timestamp}
   </div>
 </body>
 </html>
 """
 
 
-def render_pdf(inv: Invoice, items: List[Item]) -> str:
-    html = html_factura(inv, items)
+def render_pdf(inv: Invoice, items: List[Item], timestamp: str) -> str:
+    html = html_factura(inv, items, timestamp)
     path = os.path.join(OUTPUT_DIR, f"factura_{inv.serie}_{inv.numero}.pdf")
     HTML(string=html, base_url=os.getcwd()).write_pdf(path)
     return path
@@ -452,12 +445,12 @@ def crear_factura(datos: InvoiceIn):
         # Hash encadenado y registro de alta
         prev = (
             db.query(Ledger)
-            .filter(Ledger.factura_id == inv.id)
             .order_by(Ledger.id.desc())
             .first()
         )
         prev_hash = prev.hash_actual if prev else None
         payload, digest = build_registro_alta(inv, prev_hash)
+        timestamp = payload["FechaHoraGeneracion"]
 
         ledger = Ledger(
             factura_id=inv.id,
@@ -472,7 +465,7 @@ def crear_factura(datos: InvoiceIn):
 
         # QR y PDF
         inv.qr_path = generar_qr(inv)
-        inv.pdf_path = render_pdf(inv, inv.items)
+        inv.pdf_path = render_pdf(inv, inv.items, timestamp)
 
         if datos.email:
             try:
@@ -549,3 +542,21 @@ def descargar_qr(factura_id: int):
         if not inv or not inv.qr_path or not os.path.exists(inv.qr_path):
             raise HTTPException(status_code=404, detail="QR no disponible")
         return FileResponse(inv.qr_path, media_type="image/png", filename=os.path.basename(inv.qr_path))
+
+@router.get("/{factura_id}/verify")
+def verificar_factura(factura_id: int, hash: Optional[str] = None):
+    with SessionLocal() as db:
+        ledgers = db.query(Ledger).order_by(Ledger.id).all()
+        prev_hash = None
+        for led in ledgers:
+            inv = db.get(Invoice, led.factura_id)
+            payload_data = json.loads(led.payload_json)
+            _, digest = build_registro_alta(inv, prev_hash, fecha_hora=payload_data.get("FechaHoraGeneracion"))
+            if digest != led.hash_actual:
+                return {"status": "alterada"}
+            if led.factura_id == factura_id:
+                if hash and hash != led.hash_actual:
+                    return {"status": "alterada"}
+                return {"status": "valida"}
+            prev_hash = led.hash_actual
+    raise HTTPException(status_code=404, detail="Factura no encontrada")
