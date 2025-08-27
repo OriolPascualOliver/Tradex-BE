@@ -1,16 +1,37 @@
-import sqlite3
+import os
 from pathlib import Path
 from typing import Optional
 
+use_sqlcipher = os.getenv("TRADEX_USE_SQLCIPHER") == "1"
+if use_sqlcipher:
+    from pysqlcipher3 import dbapi2 as sqlite3  # type: ignore
+else:
+    import sqlite3
+
 from .auth import get_password_hash
 
-DB_PATH = Path(__file__).resolve().parent / "users.db"
+DB_PATH = Path(
+    os.getenv("TRADEX_DB_PATH", str(Path.home() / ".tradex" / "users.db"))
+)
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_permissions() -> None:
+    for p in [DB_PATH, DB_PATH.with_name(DB_PATH.name + "-wal")]:
+        if p.exists():
+            p.chmod(0o600)
 
 
 def get_connection():
     """Return a connection to the SQLite database."""
     conn = sqlite3.connect(DB_PATH)
+    if use_sqlcipher:
+        key = os.getenv("TRADEX_DB_KEY", "")
+        if key:
+            conn.execute(f"PRAGMA key = '{key}'")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
+    _ensure_permissions()
     return conn
 
 
@@ -48,21 +69,22 @@ def create_tables() -> None:
         """
     )
 
-    # Seed demo accounts if missing
-    demo_users = [
-        ("demo@fixhub.es", "demo123!"),
-        ("demo2@fixhub.es", "demo456!"),
-    ]
-    for username, password in demo_users:
-        cur.execute("SELECT 1 FROM users WHERE username = ?", (username,))
-        if cur.fetchone() is None:
-            cur.execute(
-                "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
-                (username, get_password_hash(password)),
-            )
+    if os.getenv("TRADEX_ENV") != "production":
+        demo_users = [
+            ("demo@fixhub.es", "demo123!"),
+            ("demo2@fixhub.es", "demo456!"),
+        ]
+        for username, password in demo_users:
+            cur.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+            if cur.fetchone() is None:
+                cur.execute(
+                    "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
+                    (username, get_password_hash(password)),
+                )
 
     conn.commit()
     conn.close()
+    _ensure_permissions()
 
 
 def get_user(username: str) -> Optional[sqlite3.Row]:
@@ -93,6 +115,7 @@ def add_login(username: str, device_id: str) -> None:
     )
     conn.commit()
     conn.close()
+    _ensure_permissions()
 
 
 def get_device_usage(username: str, device_id: str) -> Optional[sqlite3.Row]:
@@ -121,3 +144,4 @@ def increment_device_usage(username: str, device_id: str) -> None:
     )
     conn.commit()
     conn.close()
+    _ensure_permissions()
