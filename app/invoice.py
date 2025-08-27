@@ -68,6 +68,8 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 import qrcode
 from weasyprint import HTML
+
+from .security import hashed_path, run_isolated, content_disposition
 from lxml import etree
 
 # -----------------------------------------------------------------------------
@@ -256,9 +258,17 @@ def generar_qr(inv: Invoice) -> str:
         f"&serie={inv.serie}&num={inv.numero}"
         f"&fecha={inv.fecha.isoformat()}&total={inv.total:.2f}"
     )
-    path = os.path.join(OUTPUT_DIR, f"qr_{inv.serie}_{inv.numero}.png")
-    img = qrcode.make(url)
-    img.save(path)
+    identifier = f"{inv.serie}_{inv.numero}"
+    path = hashed_path(identifier, "qr", "png", OUTPUT_DIR)
+
+    def _render() -> None:
+        img = qrcode.make(url)
+        img.save(path)
+
+    try:
+        run_isolated(_render)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="QR generation timed out")
     return path
 
 
@@ -346,8 +356,16 @@ def html_factura(inv: Invoice, items: List[Item]) -> str:
 
 def render_pdf(inv: Invoice, items: List[Item]) -> str:
     html = html_factura(inv, items)
-    path = os.path.join(OUTPUT_DIR, f"factura_{inv.serie}_{inv.numero}.pdf")
-    HTML(string=html, base_url=os.getcwd()).write_pdf(path)
+    identifier = f"{inv.serie}_{inv.numero}"
+    path = hashed_path(identifier, "factura", "pdf", OUTPUT_DIR)
+
+    def _render() -> None:
+        HTML(string=html, base_url=os.getcwd()).write_pdf(path)
+
+    try:
+        run_isolated(_render)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="PDF generation timed out")
     return path
 
 
@@ -539,7 +557,9 @@ def descargar_pdf(factura_id: int):
         inv = db.get(Invoice, factura_id)
         if not inv or not inv.pdf_path or not os.path.exists(inv.pdf_path):
             raise HTTPException(status_code=404, detail="PDF no disponible")
-        return FileResponse(inv.pdf_path, media_type="application/pdf", filename=os.path.basename(inv.pdf_path))
+        fname = os.path.basename(inv.pdf_path)
+        headers = content_disposition(fname)
+        return FileResponse(inv.pdf_path, media_type="application/pdf", headers=headers)
 
 
 @router.get("/{factura_id}/qr")
@@ -548,4 +568,6 @@ def descargar_qr(factura_id: int):
         inv = db.get(Invoice, factura_id)
         if not inv or not inv.qr_path or not os.path.exists(inv.qr_path):
             raise HTTPException(status_code=404, detail="QR no disponible")
-        return FileResponse(inv.qr_path, media_type="image/png", filename=os.path.basename(inv.qr_path))
+        fname = os.path.basename(inv.qr_path)
+        headers = content_disposition(fname)
+        return FileResponse(inv.qr_path, media_type="image/png", headers=headers)
