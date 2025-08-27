@@ -22,7 +22,8 @@ def create_tables() -> None:
         """
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
-            hashed_password TEXT NOT NULL
+            hashed_password TEXT NOT NULL,
+            role TEXT NOT NULL
         )
         """
     )
@@ -50,15 +51,15 @@ def create_tables() -> None:
 
     # Seed demo accounts if missing
     demo_users = [
-        ("demo@fixhub.es", "demo123!"),
-        ("demo2@fixhub.es", "demo456!"),
+        ("demo@fixhub.es", "demo123!", "Owner"),
+        ("demo2@fixhub.es", "demo456!", "User"),
     ]
-    for username, password in demo_users:
+    for username, password, role in demo_users:
         cur.execute("SELECT 1 FROM users WHERE username = ?", (username,))
         if cur.fetchone() is None:
             cur.execute(
-                "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
-                (username, get_password_hash(password)),
+                "INSERT INTO users (username, hashed_password, role) VALUES (?, ?, ?)",
+                (username, get_password_hash(password), role),
             )
 
     conn.commit()
