@@ -1,4 +1,5 @@
-import sys, pathlib, types, json
+import sys, pathlib, types, json, os
+os.environ.setdefault("SECRET_KEY", "testing")
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 
 # Stub external modules not available in test environment
@@ -96,6 +97,7 @@ def test_pdf_generation(monkeypatch, tmp_path):
     assert res.body == b'pdf'
 
 
+
 def test_openai_disabled(monkeypatch, tmp_path):
     setup_quote(monkeypatch, tmp_path)
     monkeypatch.setattr(quote, 'OPENAI_ENABLED', False)
@@ -154,3 +156,24 @@ def test_pii_redaction(monkeypatch, tmp_path):
     dump = json.dumps(logged)
     assert 'john@example.com' not in dump
     assert '[REDACTED]' in dump
+
+def test_pdf_malicious_name(monkeypatch, tmp_path):
+    setup_quote(monkeypatch, tmp_path)
+    with pytest.raises(quote.HTTPException) as exc:
+        quote.pdf('../evil', x_api_key=None)
+    assert exc.value.status_code == 400
+
+
+def test_pdf_timeout(monkeypatch, tmp_path):
+    setup_quote(monkeypatch, tmp_path)
+    req = quote.QuoteRequest(client=quote.Client(name='John'), description='desc')
+    quote.generate(req, x_api_key=None, device_id='dev1', current_user='user@example.com')
+
+    def fake_timeout(func, timeout=5, max_memory=268435456):
+        raise TimeoutError
+
+    monkeypatch.setattr(quote, 'run_isolated', fake_timeout)
+    with pytest.raises(quote.HTTPException) as exc:
+        quote.pdf('q_00001', x_api_key=None)
+    assert exc.value.status_code == 504
+

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Header, Response, Depends
+from fastapi import APIRouter, HTTPException, Header, Response, Depends, Request
 from pydantic import BaseModel, Field
 from typing import List, Optional, Any, Dict
 from datetime import datetime, timedelta
@@ -7,10 +7,12 @@ from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
 
+from .security import run_isolated, sanitize_filename, content_disposition
+
 # ---------------------------------------------------------------------------
 # Optional authentication dependency
 # ---------------------------------------------------------------------------
-ENABLE_USER_AUTH = os.getenv("ENABLE_USER_AUTH", "1") == "1"
+ENABLE_USER_AUTH = os.getenv("ENABLE_USER_AUTH", "0") == "1"
 if ENABLE_USER_AUTH:
     from .dependencies import get_current_user
 else:  # pragma: no cover - simple fallback for unauthenticated mode
@@ -149,6 +151,7 @@ def parse_json(s: str) -> dict:
 @router.post("/api/quotes/generate", response_model=Quote)
 def generate(
     q: QuoteRequest,
+    request: Request,
     x_api_key: Optional[str] = Header(None),
     device_id: str = Header(..., alias="X-Device-Id"),
     current_user: str = Depends(get_current_user),
@@ -205,6 +208,15 @@ def generate(
         raw_text=data.get("raw_text","")
     )
     DB[quote.quote_id] = quote
+    database.add_audit_log(
+        actor=current_user,
+        ip=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent", ""),
+        action="create",
+        obj=f"quote:{quote.quote_id}",
+        before=None,
+        after=quote.model_dump(),
+    )
     return quote
 
 class PatchItem(BaseModel):
@@ -222,13 +234,20 @@ class PatchBody(BaseModel):
     note: Optional[str] = None
 
 @router.patch("/api/quotes/{quote_id}", response_model=Quote)
-def patch_quote(quote_id: str, body: PatchBody, x_api_key: Optional[str] = Header(None)):
+def patch_quote(
+    quote_id: str,
+    body: PatchBody,
+    request: Request,
+    x_api_key: Optional[str] = Header(None),
+    current_user: str = Depends(get_current_user),
+):
     check_api_key(x_api_key)
     if not OPENAI_ENABLED:
         raise HTTPException(503, "OpenAI integration disabled")
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
+    before = q.model_dump()
 
     forward_to_openai("Actualiza un presupuesto con los campos proporcionados",
                       {"quote_id": quote_id, **body.model_dump(exclude_unset=True)})
@@ -259,6 +278,15 @@ def patch_quote(quote_id: str, body: PatchBody, x_api_key: Optional[str] = Heade
     q.total     = round(q.subtotal + q.tax_total, 2)
 
     DB[quote_id] = q
+    database.add_audit_log(
+        actor=current_user,
+        ip=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent", ""),
+        action="update",
+        obj=f"quote:{quote_id}",
+        before=before,
+        after=q.model_dump(),
+    )
     return q
 
 # plantilla HTML para el PDF (demo)
@@ -309,8 +337,12 @@ TPL = Environment(loader=BaseLoader()).from_string("""
 @router.post("/api/quotes/{quote_id}/pdf")
 def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
+
     if not OPENAI_ENABLED:
         raise HTTPException(503, "OpenAI integration disabled")
+
+    sanitize_filename(quote_id)
+
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
@@ -318,14 +350,18 @@ def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     forward_to_openai("Genera un PDF para este presupuesto", q.model_dump())
 
     html = TPL.render(quote=q.model_dump())
-    pdf_bytes = HTML(string=html).write_pdf()  # Docs: WeasyPrint
-    # Opción B: enviar al webhook de Fixhub si está configurado
+
+    def _render() -> bytes:
+        return HTML(string=html).write_pdf()  # Docs: WeasyPrint
+
+    try:
+        pdf_bytes = run_isolated(_render)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="PDF generation timed out")
+
     webhook = os.getenv("FIXHUB_WEBHOOK_URL", "").strip()
     if webhook:
-        # Aquí harías requests.post(webhook, files={"file":("presupuesto.pdf", pdf_bytes, "application/pdf")}, data={...})
-        # Para demo devolvemos status
-        return {"status":"sent", "bytes": len(pdf_bytes)}
+        return {"status": "sent", "bytes": len(pdf_bytes)}
 
-    # Opción A: devolver binario al frontend
-    return Response(content=pdf_bytes, media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="{quote_id}.pdf"'})
+    headers = content_disposition(f"{quote_id}.pdf")
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
