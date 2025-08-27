@@ -31,7 +31,7 @@ def test_quote_router_disabled_by_default(monkeypatch):
     app = reload_app(monkeypatch)
     paths = [route.path for route in app.routes]
     assert "/api/quotes/generate" not in paths
-    assert "/api/status" in paths
+    assert "/api/health-status/public" in paths
 
 
 @pytest.mark.skipif(importlib.util.find_spec("sqlalchemy") is None, reason="sqlalchemy not installed")
