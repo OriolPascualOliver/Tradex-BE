@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Header, Response, Depends, Request
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 from datetime import datetime, timedelta
-import os, json
+import os, json, time
 from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
@@ -70,35 +70,76 @@ class Quote(BaseModel):
 DB: dict[str, Quote] = {}
 
 # --- OpenAI ---
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_ENABLED = bool(OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_ENABLED else None
 MODEL = os.getenv("MODEL_NAME", "gpt-4o-mini")  # ver doc oficial para modelos soportados
 PROMPT_FILE = os.path.join(os.path.dirname(__file__), "..", "aps", "prompt.txt")
+
+# --- Seguridad adicional ---
+PII_FIELDS = {"name", "nif", "billingAddress", "email", "phone"}
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "aps")
+ALLOWED_DOCS = set(filter(None, os.getenv("QUOTE_DOC_WHITELIST", "").split(",")))
+DEMO_RATE_LIMIT_SECONDS = int(os.getenv("DEMO_RATE_LIMIT_SECONDS", "60"))
+DEMO_DAILY_QUOTA = int(os.getenv("DEMO_DAILY_QUOTA", "20"))
+DEMO_USAGE: Dict[str, Dict[str, Any]] = {}
 
 # --- Router ---
 router = APIRouter()
 
 # --- Utils ---
+def _redact_pii(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {k: ("[REDACTED]" if k in PII_FIELDS else _redact_pii(v)) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_redact_pii(v) for v in data]
+    return data
+
+
 def forward_to_openai(custom_message: str, payload: dict,
                       documents: Optional[List[str]] = None,
                       response_format: Optional[dict] = None):
-    """Forward data to OpenAI, logging the sent messages."""
+    """Forward data to OpenAI, logging the sent messages with PII redacted."""
     messages = [
         {"role": "system", "content": custom_message},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
     ]
+
+    log_messages = [
+        {"role": "system", "content": custom_message},
+        {"role": "user", "content": json.dumps(_redact_pii(payload), ensure_ascii=False)}
+    ]
+
     if documents:
-        for path in documents:
+        for name in documents:
+            base = os.path.basename(name)
+            if base not in ALLOWED_DOCS:
+                continue
+            safe_path = os.path.join(DOCS_DIR, base)
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    messages.append({"role": "user", "content": f.read()})
+                with open(safe_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                messages.append({"role": "user", "content": content})
+                log_messages.append({"role": "user", "content": f"[Document {base}]"})
             except Exception:
-                messages.append({"role": "user", "content": f"[Error leyendo {path}]"})
+                log_messages.append({"role": "user", "content": f"[Error leyendo {base}]"})
+
     with open("last_openai_message.json", "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
-    params = {"model": MODEL, "messages": messages}
+        json.dump(log_messages, f, ensure_ascii=False, indent=2)
+
+    params = {"model": MODEL, "messages": messages, "timeout": int(os.getenv("OPENAI_TIMEOUT", "10"))}
     if response_format:
         params["response_format"] = response_format
-    return client.chat.completions.create(**params)
+
+    retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
+    last_err = None
+    for _ in range(retries):
+        try:
+            return client.chat.completions.create(**params)
+        except Exception as e:  # pragma: no cover - network errors
+            last_err = e
+            time.sleep(1)
+    raise HTTPException(502, f"OpenAI request failed: {last_err}")
 
 def parse_json(s: str) -> dict:
     try:
@@ -116,6 +157,22 @@ def generate(
     current_user: str = Depends(get_current_user),
 ):
     check_api_key(x_api_key)
+    if not OPENAI_ENABLED:
+        raise HTTPException(503, "OpenAI integration disabled")
+
+    # Demo account rate limiting and quotas
+    if current_user.startswith("demo"):
+        now = datetime.utcnow()
+        info = DEMO_USAGE.get(current_user)
+        if not info or info.get("day") != now.date():
+            info = {"day": now.date(), "count": 0, "last": None}
+        if info["last"] and now - info["last"] < timedelta(seconds=DEMO_RATE_LIMIT_SECONDS):
+            raise HTTPException(429, "Too many requests, slow down")
+        if info["count"] >= DEMO_DAILY_QUOTA:
+            raise HTTPException(429, "Daily quota exceeded")
+        info["count"] += 1
+        info["last"] = now
+        DEMO_USAGE[current_user] = info
 
     try:
         prompt_scope: dict[str, str] = {}
@@ -125,21 +182,6 @@ def generate(
     except FileNotFoundError:
         raise HTTPException(500, "Prompt configuration file not found")
 
-
-    # Demo account limitations
-    if current_user == "demo@fixhub.es":
-        usage = database.get_device_usage(current_user, device_id)
-        if usage and usage["quote_count"] >= 3:
-            raise HTTPException(403, "Quote limit reached for this device")
-        database.increment_device_usage(current_user, device_id)
-    elif current_user == "demo2@fixhub.es":
-        usage = database.get_device_usage(current_user, device_id)
-        limit_min = int(os.getenv("DEMO2_TIME_LIMIT_MINUTES", "60"))
-        if usage:
-            first_access = datetime.strptime(usage["first_access"], "%Y-%m-%d %H:%M:%S")
-            if datetime.utcnow() - first_access > timedelta(minutes=limit_min):
-                raise HTTPException(403, "Demo period expired for this device")
-        database.increment_device_usage(current_user, device_id)
 
     completion = forward_to_openai(custom_msg, q.model_dump(), q.documents,
                                    response_format={"type": "json_object"})
@@ -200,6 +242,8 @@ def patch_quote(
     current_user: str = Depends(get_current_user),
 ):
     check_api_key(x_api_key)
+    if not OPENAI_ENABLED:
+        raise HTTPException(503, "OpenAI integration disabled")
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
@@ -293,7 +337,12 @@ TPL = Environment(loader=BaseLoader()).from_string("""
 @router.post("/api/quotes/{quote_id}/pdf")
 def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
+
+    if not OPENAI_ENABLED:
+        raise HTTPException(503, "OpenAI integration disabled")
+
     sanitize_filename(quote_id)
+
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
