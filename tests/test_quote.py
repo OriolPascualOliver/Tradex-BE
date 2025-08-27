@@ -61,6 +61,8 @@ def setup_quote(monkeypatch, tmp_path):
     quote.DB.clear()
     monkeypatch.setattr(quote, 'forward_to_openai', fake_forward)
     monkeypatch.setattr(quote, 'EXPECTED_API_KEY', None)
+    quote.DEMO_USAGE.clear()
+    monkeypatch.setattr(quote, 'OPENAI_ENABLED', True)
     prompt_file = tmp_path / 'prompt.py'
     prompt_file.write_text('custom_msg = "hi"')
     monkeypatch.setattr(quote, 'PROMPT_FILE', str(prompt_file))
@@ -92,3 +94,63 @@ def test_pdf_generation(monkeypatch, tmp_path):
     res = quote.pdf('q_00001', x_api_key=None)
     assert res.media_type == 'application/pdf'
     assert res.body == b'pdf'
+
+
+def test_openai_disabled(monkeypatch, tmp_path):
+    setup_quote(monkeypatch, tmp_path)
+    monkeypatch.setattr(quote, 'OPENAI_ENABLED', False)
+    req = quote.QuoteRequest(client=quote.Client(name='John'), description='desc')
+    with pytest.raises(quote.HTTPException) as exc:
+        quote.generate(req, x_api_key=None, device_id='dev1', current_user='user@example.com')
+    assert exc.value.status_code == 503
+
+
+def test_demo_rate_limit(monkeypatch, tmp_path):
+    setup_quote(monkeypatch, tmp_path)
+    monkeypatch.setattr(quote, 'DEMO_RATE_LIMIT_SECONDS', 10)
+    monkeypatch.setattr(quote, 'DEMO_DAILY_QUOTA', 5)
+    req = quote.QuoteRequest(client=quote.Client(name='John'), description='desc')
+    quote.generate(req, x_api_key=None, device_id='dev1', current_user='demo@fixhub.es')
+    with pytest.raises(quote.HTTPException) as exc:
+        quote.generate(req, x_api_key=None, device_id='dev1', current_user='demo@fixhub.es')
+    assert exc.value.status_code == 429
+
+
+def test_demo_daily_quota(monkeypatch, tmp_path):
+    setup_quote(monkeypatch, tmp_path)
+    monkeypatch.setattr(quote, 'DEMO_RATE_LIMIT_SECONDS', 0)
+    monkeypatch.setattr(quote, 'DEMO_DAILY_QUOTA', 1)
+    req = quote.QuoteRequest(client=quote.Client(name='John'), description='desc')
+    quote.generate(req, x_api_key=None, device_id='dev1', current_user='demo@fixhub.es')
+    with pytest.raises(quote.HTTPException) as exc:
+        quote.generate(req, x_api_key=None, device_id='dev1', current_user='demo@fixhub.es')
+    assert exc.value.status_code == 429
+
+
+def test_pii_redaction(monkeypatch, tmp_path):
+    quote.DB.clear()
+    quote.DEMO_USAGE.clear()
+    monkeypatch.setattr(quote, 'EXPECTED_API_KEY', None)
+    monkeypatch.setattr(quote, 'OPENAI_ENABLED', True)
+    prompt_file = tmp_path / 'prompt.py'
+    prompt_file.write_text('custom_msg = "hi"')
+    monkeypatch.setattr(quote, 'PROMPT_FILE', str(prompt_file))
+
+    class DummyClient:
+        class Chat:
+            class Completions:
+                def create(self, **kwargs):
+                    data = {
+                        'choices': [types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps({})))],
+                    }
+                    return types.SimpleNamespace(**data)
+            completions = Completions()
+        chat = Chat()
+    monkeypatch.setattr(quote, 'client', DummyClient())
+
+    req = quote.QuoteRequest(client=quote.Client(name='John', email='john@example.com'), description='desc')
+    quote.generate(req, x_api_key=None, device_id='dev1', current_user='user@example.com')
+    logged = json.loads(pathlib.Path('last_openai_message.json').read_text())
+    dump = json.dumps(logged)
+    assert 'john@example.com' not in dump
+    assert '[REDACTED]' in dump
