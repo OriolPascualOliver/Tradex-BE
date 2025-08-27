@@ -16,6 +16,34 @@ from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
+# Required secrets
+# ---------------------------------------------------------------------------
+# List of environment variables that must be present for the application to
+# start. Additional secrets can be added here as needed.
+REQUIRED_ENV_VARS = ["SECRET_KEY"]
+
+
+def validate_required_env_vars() -> None:
+    """Ensure that all required environment variables are defined.
+
+    The application should fail fast during start-up if any critical
+    configuration is missing. This helps surface misconfigurations early in
+    the deployment process and avoids running with insecure defaults.
+    """
+
+    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing:
+        missing_vars = ", ".join(missing)
+        raise RuntimeError(
+            f"Missing required environment variables: {missing_vars}"
+        )
+
+
+# Validate secrets before continuing with application setup
+validate_required_env_vars()
+
+
+# ---------------------------------------------------------------------------
 # Feature flags
 # ---------------------------------------------------------------------------
 ENABLE_USER_AUTH = os.getenv("ENABLE_USER_AUTH", "1") == "1"
