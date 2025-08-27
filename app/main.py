@@ -1,12 +1,9 @@
 """Application entry point with optional modules.
 
 Environment variables control which features are enabled:
-
-```
-ENABLE_USER_AUTH  - user database and login endpoints (default: "1")
-ENABLE_INVOICE    - invoice routes (default: "1")
-ENABLE_QUOTE      - quote routes (default: "1")
-```
+- ENABLE_USER_AUTH  - user database and login endpoints (default: "1")
+- ENABLE_INVOICE    - invoice routes (default: "1")
+- ENABLE_QUOTE      - quote routes (default: "1")
 """
 
 import os
@@ -77,7 +74,7 @@ def health_status():
 # ---------------------------------------------------------------------------
 if ENABLE_USER_AUTH:
     from . import auth, database
-    from .dependencies import get_current_user
+    from .dependencies import get_current_user, oauth2_scheme
 
     database.create_tables()
 
@@ -85,20 +82,32 @@ if ENABLE_USER_AUTH:
         email: str
         password: str
 
-    class Token(BaseModel):
-        token: str
+    class TokenPair(BaseModel):
+        access_token: str
+        refresh_token: str
 
-    @app.post("/api/auth/login", response_model=Token)
-    def login(data: LoginRequest):
+    class RefreshRequest(BaseModel):
+        refresh_token: str
+
+    @app.post("/api/auth/login", response_model=TokenPair)
+    def login(data: LoginRequest, request: Request):
+        ip = request.client.host
+        if auth.is_ip_blocked(ip):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many attempts",
+            )
         user = database.get_user(data.email)
         if not user or not auth.verify_password(data.password, user["hashed_password"]):
+            auth.record_failed_login(ip)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
             )
-        # Record the login with a generic device identifier
+        auth.reset_failed_logins(ip)
         database.add_login(data.email, "web")
         access_token = auth.create_access_token({"sub": data.email})
+
         csrf_token = secrets.token_urlsafe(16)
         response = JSONResponse(content=Token(token=access_token).dict())
         response.set_cookie(
@@ -117,11 +126,30 @@ if ENABLE_USER_AUTH:
         return response
 
 
+    @app.post("/api/auth/refresh", response_model=TokenPair)
+    def refresh_tokens(data: RefreshRequest):
+        username = auth.use_refresh_token(data.refresh_token)
+        if not username:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
+        access_token = auth.create_access_token({"sub": username})
+        refresh_token = auth.create_refresh_token({"sub": username})
+        return TokenPair(access_token=access_token, refresh_token=refresh_token)
+
+    @app.post("/api/auth/logout")
+    def logout(token: str = Depends(oauth2_scheme)):
+        payload = auth.decode_access_token(token)
+        if payload:
+            auth.revoke_token(token)
+            auth.revoke_refresh_tokens_for_user(payload.get("sub"))
+        return {"detail": "Logged out"}
+
     @app.get("/api/auth/users")
     def list_users():
         """Return all users for troubleshooting purposes."""
         return database.get_all_users()
-
 
     @app.get("/secure-data")
     def read_secure_data(current_user: str = Depends(get_current_user)):
