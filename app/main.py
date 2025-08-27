@@ -10,8 +10,10 @@ ENABLE_QUOTE      - quote routes (default: "1")
 """
 
 import os
-from fastapi import Depends, FastAPI, HTTPException, status
+import secrets
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 
@@ -24,13 +26,41 @@ ENABLE_QUOTE = os.getenv("ENABLE_QUOTE", "1") == "1"
 
 app = FastAPI(title="Tradex Backend")
 
+# Restrict CORS to production and staging domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # or specific frontend URLs
+    allow_origins=["https://fixhub.opotek.es"],
+    allow_origin_regex=r"https://.*\.staging\.opotek\.es",
     allow_credentials=True,
     allow_methods=["*"],  # ensures OPTIONS is permitted
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Inject common security headers into every response."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers[
+        "Strict-Transport-Security"
+    ] = "max-age=63072000; includeSubDomains; preload"
+    return response
+
+
+@app.middleware("http")
+async def csrf_protect(request: Request, call_next):
+    """Simple double submit CSRF protection for cookie-based auth."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        auth_cookie = request.cookies.get("auth_token")
+        if auth_cookie:
+            csrf_cookie = request.cookies.get("csrf_token")
+            csrf_header = request.headers.get("X-CSRF-Token")
+            if not csrf_cookie or csrf_header != csrf_cookie:
+                return Response(status_code=status.HTTP_403_FORBIDDEN)
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +99,22 @@ if ENABLE_USER_AUTH:
         # Record the login with a generic device identifier
         database.add_login(data.email, "web")
         access_token = auth.create_access_token({"sub": data.email})
-        return Token(token=access_token)
+        csrf_token = secrets.token_urlsafe(16)
+        response = JSONResponse(content=Token(token=access_token).dict())
+        response.set_cookie(
+            "auth_token",
+            access_token,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+        )
+        response.set_cookie(
+            "csrf_token",
+            csrf_token,
+            secure=True,
+            samesite="lax",
+        )
+        return response
 
 
     @app.get("/api/auth/users")
