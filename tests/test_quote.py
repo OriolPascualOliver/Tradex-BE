@@ -1,4 +1,5 @@
-import sys, pathlib, types, json
+import sys, pathlib, types, json, os
+os.environ.setdefault("SECRET_KEY", "testing")
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 
 # Stub external modules not available in test environment

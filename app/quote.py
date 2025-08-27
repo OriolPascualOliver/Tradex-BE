@@ -10,7 +10,7 @@ from weasyprint import HTML
 # ---------------------------------------------------------------------------
 # Optional authentication dependency
 # ---------------------------------------------------------------------------
-ENABLE_USER_AUTH = os.getenv("ENABLE_USER_AUTH", "1") == "1"
+ENABLE_USER_AUTH = os.getenv("ENABLE_USER_AUTH", "0") == "1"
 if ENABLE_USER_AUTH:
     from .dependencies import get_current_user
 else:  # pragma: no cover - simple fallback for unauthenticated mode
