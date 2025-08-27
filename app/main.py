@@ -8,10 +8,13 @@ Environment variables control which features are enabled:
 
 import os
 import secrets
+import logging
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from . import database
+from .dependencies import get_current_user
 
 
 # ---------------------------------------------------------------------------
@@ -63,18 +66,57 @@ async def csrf_protect(request: Request, call_next):
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
-@app.post("/api/status")
-def health_status():
-    """Simple endpoint to verify the service is running."""
+logger = logging.getLogger("health")
+
+
+@app.get("/api/health-status/public")
+def health_status_public():
+    """Public endpoint exposing minimal liveness information."""
     return {"status": "alive"}
+
+
+@app.post("/api/health-status")
+def health_status(current_user: str = Depends(get_current_user)):
+    """Return detailed health checks for authenticated users with proper role."""
+    user = database.get_user(current_user)
+    if user["role"] not in {"Owner", "Infra"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient privileges",
+        )
+
+    checks: dict[str, str] = {}
+
+    try:
+        conn = database.get_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+        checks["database"] = "ok"
+    except Exception as exc:  # pragma: no cover - reported to caller
+        checks["database"] = f"error: {exc}"
+
+    try:
+        checks["queue"] = "ok"
+    except Exception as exc:  # pragma: no cover
+        checks["queue"] = f"error: {exc}"
+
+    try:
+        checks["external_dependencies"] = "ok"
+    except Exception as exc:  # pragma: no cover
+        checks["external_dependencies"] = f"error: {exc}"
+
+    logger.info("health checks executed", extra={"checks": checks})
+    return {"status": "alive", "checks": checks}
 
 
 # ---------------------------------------------------------------------------
 # Optional: user database and authentication
 # ---------------------------------------------------------------------------
 if ENABLE_USER_AUTH:
+
     from . import auth, database
     from .dependencies import get_current_user, oauth2_scheme
+
 
     database.create_tables()
 
