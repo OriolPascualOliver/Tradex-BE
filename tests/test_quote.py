@@ -65,7 +65,7 @@ def setup_quote(monkeypatch, tmp_path):
     quote.DEMO_USAGE.clear()
     monkeypatch.setattr(quote, 'OPENAI_ENABLED', True)
     prompt_file = tmp_path / 'prompt.py'
-    prompt_file.write_text('custom_msg = "hi"')
+    prompt_file.write_text('custom_msg = "hi"\ntarifa_hora_eur = 60')
     monkeypatch.setattr(quote, 'PROMPT_FILE', str(prompt_file))
 
 
@@ -95,6 +95,22 @@ def test_pdf_generation(monkeypatch, tmp_path):
     res = quote.pdf('q_00001', x_api_key=None)
     assert res.media_type == 'application/pdf'
     assert res.body == b'pdf'
+
+    assert 'X-Checksum' in res.headers
+
+
+def test_pdf_checksum_changes(monkeypatch, tmp_path):
+    setup_quote(monkeypatch, tmp_path)
+    req = quote.QuoteRequest(client=quote.Client(name='John'), description='desc')
+    quote.generate(req, x_api_key=None, device_id='dev1', current_user='user@example.com')
+    res1 = quote.pdf('q_00001', x_api_key=None)
+    checksum1 = res1.headers['X-Checksum']
+    body = quote.PatchBody(items=[quote.PatchItem(index=0, qty=2)])
+    quote.patch_quote('q_00001', body, x_api_key=None)
+    res2 = quote.pdf('q_00001', x_api_key=None)
+    checksum2 = res2.headers['X-Checksum']
+    assert checksum1 != checksum2
+
 
 
 
@@ -176,4 +192,5 @@ def test_pdf_timeout(monkeypatch, tmp_path):
     with pytest.raises(quote.HTTPException) as exc:
         quote.pdf('q_00001', x_api_key=None)
     assert exc.value.status_code == 504
+
 

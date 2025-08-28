@@ -2,7 +2,9 @@ from fastapi import APIRouter, HTTPException, Header, Response, Depends, Request
 from pydantic import BaseModel, Field
 from typing import List, Optional, Any, Dict
 from datetime import datetime, timedelta
-import os, json, time
+
+import os, json, time, hashlib
+
 from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
@@ -65,6 +67,7 @@ class Quote(BaseModel):
     terms: Optional[str] = ""
     note: Optional[str] = ""
     raw_text: Optional[str] = ""
+    demo: bool = False
 
 # --- Memoria en RAM (demo). Cambiar a DB en prod. ---
 DB: dict[str, Quote] = {}
@@ -194,6 +197,7 @@ def generate(
     tax_total = round(subtotal * tax_rate / 100, 2)
     total = round(subtotal + tax_total, 2)
 
+    is_demo = current_user in {"demo@fixhub.es", "demo2@fixhub.es"}
     quote = Quote(
         quote_id=f"q_{len(DB)+1:05d}",
         currency=data.get("currency","EUR"),
@@ -205,7 +209,8 @@ def generate(
         schedule=q.when,
         terms=data.get("terms",""),
         note=data.get("note",""),
-        raw_text=data.get("raw_text","")
+        raw_text=data.get("raw_text",""),
+        demo=is_demo
     )
     DB[quote.quote_id] = quote
     database.add_audit_log(
@@ -307,6 +312,7 @@ TPL = Environment(loader=BaseLoader()).from_string("""
 <body>
   <h1>Presupuesto {{quote.quote_id}}</h1>
   <div class="muted">Programado: {{quote.schedule or "Sin fecha"}}</div>
+  {% if demo %}<div style="position:fixed; top:40%; left:20%; font-size:72px; color:rgba(200,0,0,0.2); transform:rotate(-30deg);">DEMO</div>{% endif %}
 
   <table>
     <thead><tr><th>Concepto</th><th>Ud</th><th>Cant.</th><th>Precio</th><th>Importe</th></tr></thead>
@@ -330,11 +336,12 @@ TPL = Environment(loader=BaseLoader()).from_string("""
 
   <p class="muted">{{quote.terms}}</p>
   {% if quote.note %}<p class="muted">Nota: {{quote.note}}</p>{% endif %}
+  <p class="muted">{{seal}}</p>
 </body>
 </html>
 """)
 
-@router.post("/api/quotes/{quote_id}/pdf")
+@router.get("/api/quotes/{quote_id}/pdf")
 def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     check_api_key(x_api_key)
 
@@ -346,22 +353,60 @@ def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     if quote_id not in DB:
         raise HTTPException(404, "Quote not found")
     q = DB[quote_id]
-
     forward_to_openai("Genera un PDF para este presupuesto", q.model_dump())
 
-    html = TPL.render(quote=q.model_dump())
 
-    def _render() -> bytes:
-        return HTML(string=html).write_pdf()  # Docs: WeasyPrint
-
+    # Metadatos y checksum
+    prompt_version = "unknown"
+    tarifa = None
     try:
-        pdf_bytes = run_isolated(_render)
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="PDF generation timed out")
+        with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+        prompt_version = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
+        scope: dict[str, object] = {}
+        try:
+            exec(content, {}, scope)
+        except Exception:
+            pass
+        tarifa = scope.get("tarifa_hora_eur")
+    except FileNotFoundError:
+        pass
+
+    data_for_checksum = {
+        "quote": q.model_dump(),
+        "prompt_version": prompt_version,
+        "iva": q.tax_rate,
+        "tarifa": tarifa,
+        "demo": q.demo,
+    }
+    checksum = hashlib.sha256(
+        json.dumps(data_for_checksum, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    seal_parts = [f"Prompt {prompt_version}", f"IVA {q.tax_rate}%"]
+    if tarifa is not None:
+        seal_parts.append(f"Tarifa {tarifa}")
+    seal_parts.append(f"Checksum {checksum}")
+    if q.demo:
+        seal_parts.append("DEMO")
+    seal = " | ".join(seal_parts)
+
+    html = TPL.render(quote=q.model_dump(), seal=seal, demo=q.demo)
+    pdf_bytes = HTML(string=html).write_pdf()  # Docs: WeasyPrint
+    # Opción B: enviar al webhook de Fixhub si está configurado
 
     webhook = os.getenv("FIXHUB_WEBHOOK_URL", "").strip()
     if webhook:
         return {"status": "sent", "bytes": len(pdf_bytes)}
 
-    headers = content_disposition(f"{quote_id}.pdf")
-    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+
+    # Opción A: devolver binario al frontend
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{quote_id}.pdf"',
+            "X-Checksum": checksum,
+        },
+    )
+
