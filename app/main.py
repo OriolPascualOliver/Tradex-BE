@@ -1,31 +1,36 @@
-"""Application entry point with optional modules.
+"""Application entry point with optional modules."""
+"""
+Application entry point with optional modules.
 
 Environment variables control which features are enabled:
 
 ENABLE_USER_AUTH  - user database and login endpoints (default: "0")
 ENABLE_INVOICE    - invoice routes (default: "0")
 ENABLE_QUOTE      - quote routes (default: "0")
-
-
 """
 
 import os
-
+import uuid
 import secrets
-import logging
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from . import database
-from .dependencies import get_current_user
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from .observability import (
+    CONTENT_TYPE_LATEST,
+    correlation_id_ctx,
+    generate_metrics,
+    inc_http_403,
+    inc_http_429,
+    inc_login_failure,
+    logger,
+)
 
 # ---------------------------------------------------------------------------
 # Feature flags
 # ---------------------------------------------------------------------------
-
 
 def _get_flag(name: str) -> bool:
     """Return boolean value from env var (`"0"`/`"1"`) with validation."""
@@ -52,6 +57,30 @@ INTERNAL_USERS = {
 }
 
 app = FastAPI(title="Tradex Backend")
+
+
+class ObservabilityMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+        correlation_id_ctx.set(correlation_id)
+        response = await call_next(request)
+        response.headers["X-Correlation-ID"] = correlation_id
+        if response.status_code == status.HTTP_403_FORBIDDEN:
+            inc_http_403()
+        elif response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            inc_http_429()
+        logger.info(
+            "request",
+            extra={
+                "method": request.method,
+                "path": str(request.url.path),
+                "status_code": response.status_code,
+            },
+        )
+        return response
+
+
+app.add_middleware(ObservabilityMiddleware)
 
 # Restrict CORS to production and staging domains
 app.add_middleware(
@@ -93,8 +122,6 @@ async def csrf_protect(request: Request, call_next):
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
-logger = logging.getLogger("health")
-
 
 @app.get("/api/health-status/public")
 def health_status_public():
@@ -102,38 +129,10 @@ def health_status_public():
     return {"status": "alive"}
 
 
-@app.post("/api/health-status")
-def health_status(current_user: str = Depends(get_current_user)):
-    """Return detailed health checks for authenticated users with proper role."""
-    user = database.get_user(current_user)
-    if user["role"] not in {"Owner", "Infra"}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient privileges",
-        )
-
-    checks: dict[str, str] = {}
-
-    try:
-        conn = database.get_connection()
-        conn.execute("SELECT 1")
-        conn.close()
-        checks["database"] = "ok"
-    except Exception as exc:  # pragma: no cover - reported to caller
-        checks["database"] = f"error: {exc}"
-
-    try:
-        checks["queue"] = "ok"
-    except Exception as exc:  # pragma: no cover
-        checks["queue"] = f"error: {exc}"
-
-    try:
-        checks["external_dependencies"] = "ok"
-    except Exception as exc:  # pragma: no cover
-        checks["external_dependencies"] = f"error: {exc}"
-
-    logger.info("health checks executed", extra={"checks": checks})
-    return {"status": "alive", "checks": checks}
+@app.get("/metrics")
+def metrics():
+    """Expose Prometheus metrics."""
+    return Response(generate_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ---------------------------------------------------------------------------
@@ -144,13 +143,15 @@ if ENABLE_USER_AUTH:
     from . import auth, database, audit
     from .dependencies import get_current_user, oauth2_scheme
 
-
     database.create_tables()
     app.include_router(audit.router)
 
     class LoginRequest(BaseModel):
         email: str
         password: str
+
+    class Token(BaseModel):
+        token: str
 
     class TokenPair(BaseModel):
         access_token: str
@@ -170,6 +171,7 @@ if ENABLE_USER_AUTH:
         user = database.get_user(data.email)
         if not user or not auth.verify_password(data.password, user["hashed_password"]):
             auth.record_failed_login(ip)
+            inc_login_failure()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
@@ -194,7 +196,6 @@ if ENABLE_USER_AUTH:
             samesite="lax",
         )
         return response
-
 
     @app.post("/api/auth/refresh", response_model=TokenPair)
     def refresh_tokens(data: RefreshRequest):

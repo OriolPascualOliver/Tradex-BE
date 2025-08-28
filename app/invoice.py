@@ -69,7 +69,9 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 import qrcode
 from weasyprint import HTML
 
+from .observability import inc_invoice_verification
 from .security import hashed_path, run_isolated, content_disposition
+
 from lxml import etree
 
 # -----------------------------------------------------------------------------
@@ -582,20 +584,14 @@ def descargar_qr(factura_id: int):
         return FileResponse(inv.qr_path, media_type="image/png", filename=os.path.basename(inv.qr_path))
 
 @router.get("/{factura_id}/verify")
-def verificar_factura(factura_id: int, hash: Optional[str] = None):
+def verificar_factura(factura_id: int):
+    """Recalculate hash to verify invoice integrity."""
     with SessionLocal() as db:
-        ledgers = db.query(Ledger).order_by(Ledger.id).all()
-        prev_hash = None
-        for led in ledgers:
-            inv = db.get(Invoice, led.factura_id)
-            payload_data = json.loads(led.payload_json)
-            _, digest = build_registro_alta(inv, prev_hash, fecha_hora=payload_data.get("FechaHoraGeneracion"))
-            if digest != led.hash_actual:
-                return {"status": "alterada"}
-            if led.factura_id == factura_id:
-                if hash and hash != led.hash_actual:
-                    return {"status": "alterada"}
-                return {"status": "valida"}
-            prev_hash = led.hash_actual
-    raise HTTPException(status_code=404, detail="Factura no encontrada")
-
+        inv = db.get(Invoice, factura_id)
+        if not inv:
+            raise HTTPException(status_code=404, detail="Factura no encontrada")
+        data = f"{inv.serie}{inv.numero}{inv.fecha}{inv.emisor_nif}{inv.receptor_nif}{inv.total}"
+        digest = hashlib.sha256(data.encode()).hexdigest()
+        verified = inv.hash_actual == digest
+        inc_invoice_verification()
+        return {"verified": verified}

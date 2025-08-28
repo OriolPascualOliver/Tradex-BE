@@ -8,6 +8,7 @@ import os, json, time, hashlib
 from openai import OpenAI
 from jinja2 import Environment, BaseLoader
 from weasyprint import HTML
+from .observability import inc_openai_request
 
 from .security import run_isolated, sanitize_filename, content_disposition
 
@@ -134,6 +135,7 @@ def forward_to_openai(custom_message: str, payload: dict,
     if response_format:
         params["response_format"] = response_format
 
+
     retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
     last_err = None
     for _ in range(retries):
@@ -143,6 +145,7 @@ def forward_to_openai(custom_message: str, payload: dict,
             last_err = e
             time.sleep(1)
     raise HTTPException(502, f"OpenAI request failed: {last_err}")
+
 
 def parse_json(s: str) -> dict:
     try:
