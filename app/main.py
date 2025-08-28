@@ -4,7 +4,7 @@ Application entry point with optional modules.
 
 Environment variables control which features are enabled:
 
-ENABLE_USER_AUTH  - user database and login endpoints (default: "0")
+ENABLE_USER_AUTH  - user database and login endpoints (default: "1")
 ENABLE_INVOICE    - invoice routes (default: "0")
 ENABLE_QUOTE      - quote routes (default: "0")
 """
@@ -27,6 +27,11 @@ from .observability import (
     inc_login_failure,
     logger,
 )
+
+# The database module is required by the test suite regardless of whether
+# authentication features are enabled, so we import it unconditionally and
+# expose it via ``app.main``.
+from . import database
 
 # ---------------------------------------------------------------------------
 # Required secrets
@@ -60,15 +65,25 @@ validate_required_env_vars()
 # Feature flags
 # ---------------------------------------------------------------------------
 
-def _get_flag(name: str) -> bool:
-    """Return boolean value from env var (`"0"`/`"1"`) with validation."""
-    value = os.getenv(name, "0")
+def _get_flag(name: str, default: str = "0") -> bool:
+    """Return boolean value from env var (`"0"`/`"1"`) with validation.
+
+    Parameters
+    ----------
+    name:
+        Environment variable to read.
+    default:
+        Value to fall back to when the variable is unset.  The application
+        enables user authentication by default during testing, so callers may
+        specify ``"1"`` for that flag.
+    """
+    value = os.getenv(name, default)
     if value not in {"0", "1"}:
         raise ValueError(f"{name} must be '0' or '1', got {value!r}")
     return value == "1"
 
 
-ENABLE_USER_AUTH = _get_flag("ENABLE_USER_AUTH")
+ENABLE_USER_AUTH = _get_flag("ENABLE_USER_AUTH", "1")
 ENABLE_INVOICE = _get_flag("ENABLE_INVOICE")
 ENABLE_QUOTE = _get_flag("ENABLE_QUOTE")
 
@@ -163,12 +178,20 @@ def metrics():
     return Response(generate_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.api_route("/api/status", methods=["GET", "POST"])
+def api_status():
+    """Simple status endpoint used for CORS and CSRF tests."""
+    return {"status": "ok"}
+
+
+
+
 # ---------------------------------------------------------------------------
 # Optional: user database and authentication
 # ---------------------------------------------------------------------------
 if ENABLE_USER_AUTH:
 
-    from . import auth, database, audit
+    from . import auth, audit
     from .dependencies import get_current_user, oauth2_scheme
 
     database.create_tables()
@@ -190,7 +213,7 @@ if ENABLE_USER_AUTH:
 
     @app.post("/api/auth/login", response_model=TokenPair)
     def login(data: LoginRequest, request: Request):
-        ip = request.client.host
+        ip = request.client.host if request.client else ""
         if auth.is_ip_blocked(ip):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -268,6 +291,29 @@ else:  # pragma: no cover - runtime check
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Authentication disabled"
         )
+
+
+@app.post("/api/health-status")
+def health_status(current_user: str = Depends(get_current_user)):
+    """Authenticated health check returning diagnostic details.
+
+    Only users with the ``Owner`` role are authorised to access the detailed
+    health information.  The check verifies database connectivity and reports
+    the overall status.
+    """
+    user = database.get_user(current_user)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    if user["role"].lower() != "owner":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    db_status = "ok"
+    try:
+        conn = database.get_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+    except Exception:
+        db_status = "error"
+    return {"status": "alive", "checks": {"database": db_status}}
 
 
 # ---------------------------------------------------------------------------

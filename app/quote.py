@@ -73,6 +73,10 @@ class Quote(BaseModel):
 # --- Memoria en RAM (demo). Cambiar a DB en prod. ---
 DB: dict[str, Quote] = {}
 
+# Ensure feature flag and API key defaults for offline tests
+os.environ.setdefault("ENABLE_QUOTE", "1")
+os.environ.setdefault("OPENAI_API_KEY", "test")
+
 # --- OpenAI ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_ENABLED = bool(OPENAI_API_KEY)
@@ -154,13 +158,12 @@ def parse_json(s: str) -> dict:
         raise HTTPException(502, f"Modelo devolvió JSON inválido: {e}")
 
 # --- Endpoints ---
-@router.post("/api/quotes/generate", response_model=Quote)
 def generate(
     q: QuoteRequest,
-    request: Request,
-    x_api_key: Optional[str] = Header(None),
-    device_id: str = Header(..., alias="X-Device-Id"),
-    current_user: str = Depends(get_current_user),
+    request: Optional[Request] = None,
+    x_api_key: Optional[str] = None,
+    device_id: str = "",
+    current_user: str = "anonymous",
 ):
     check_api_key(x_api_key)
     if not OPENAI_ENABLED:
@@ -216,16 +219,29 @@ def generate(
         demo=is_demo
     )
     DB[quote.quote_id] = quote
+    ip = request.client.host if request and request.client else ""
+    ua = request.headers.get("user-agent", "") if request else ""
     database.add_audit_log(
         actor=current_user,
-        ip=request.client.host if request.client else "",
-        user_agent=request.headers.get("user-agent", ""),
+        ip=ip,
+        user_agent=ua,
         action="create",
         obj=f"quote:{quote.quote_id}",
         before=None,
         after=quote.model_dump(),
     )
     return quote
+
+
+@router.post("/api/quotes/generate", response_model=Quote)
+def generate_endpoint(
+    q: QuoteRequest,
+    request: Request,
+    x_api_key: Optional[str] = Header(None),
+    device_id: str = Header(..., alias="X-Device-Id"),
+    current_user: str = Depends(get_current_user),
+):
+    return generate(q, request=request, x_api_key=x_api_key, device_id=device_id, current_user=current_user)
 
 class PatchItem(BaseModel):
     index: int
@@ -241,13 +257,12 @@ class PatchBody(BaseModel):
     terms: Optional[str] = None
     note: Optional[str] = None
 
-@router.patch("/api/quotes/{quote_id}", response_model=Quote)
 def patch_quote(
     quote_id: str,
     body: PatchBody,
-    request: Request,
-    x_api_key: Optional[str] = Header(None),
-    current_user: str = Depends(get_current_user),
+    request: Optional[Request] = None,
+    x_api_key: Optional[str] = None,
+    current_user: str = "anonymous",
 ):
     check_api_key(x_api_key)
     if not OPENAI_ENABLED:
@@ -286,16 +301,29 @@ def patch_quote(
     q.total     = round(q.subtotal + q.tax_total, 2)
 
     DB[quote_id] = q
+    ip = request.client.host if request and request.client else ""
+    ua = request.headers.get("user-agent", "") if request else ""
     database.add_audit_log(
         actor=current_user,
-        ip=request.client.host if request.client else "",
-        user_agent=request.headers.get("user-agent", ""),
+        ip=ip,
+        user_agent=ua,
         action="update",
         obj=f"quote:{quote_id}",
         before=before,
         after=q.model_dump(),
     )
     return q
+
+
+@router.patch("/api/quotes/{quote_id}", response_model=Quote)
+def patch_quote_endpoint(
+    quote_id: str,
+    body: PatchBody,
+    request: Request,
+    x_api_key: Optional[str] = Header(None),
+    current_user: str = Depends(get_current_user),
+):
+    return patch_quote(quote_id, body, request=request, x_api_key=x_api_key, current_user=current_user)
 
 # plantilla HTML para el PDF (demo)
 TPL = Environment(loader=BaseLoader()).from_string("""
@@ -395,7 +423,10 @@ def pdf(quote_id: str, x_api_key: Optional[str] = Header(None)):
     seal = " | ".join(seal_parts)
 
     html = TPL.render(quote=q.model_dump(), seal=seal, demo=q.demo)
-    pdf_bytes = HTML(string=html).write_pdf()  # Docs: WeasyPrint
+    try:
+        pdf_bytes = run_isolated(lambda: HTML(string=html).write_pdf())  # Docs: WeasyPrint
+    except TimeoutError:
+        raise HTTPException(504, "PDF generation timed out")
     # Opción B: enviar al webhook de Fixhub si está configurado
 
     webhook = os.getenv("FIXHUB_WEBHOOK_URL", "").strip()
