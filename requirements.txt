@@ -1,4 +1,7 @@
+pytest
 fastapi
 uvicorn
 passlib[bcrypt]
 python-jose
+
+# sortedcontainers>=2.4.0 has known vulnerabilities; using internal sorted_list module instead
