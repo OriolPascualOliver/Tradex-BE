@@ -19,8 +19,10 @@ def create_tables() -> None:
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            hashed_password TEXT NOT NULL
+            org_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            hashed_password TEXT NOT NULL,
+            PRIMARY KEY (org_id, username)
         )
         """
     )
@@ -28,9 +30,13 @@ def create_tables() -> None:
         """
         CREATE TABLE IF NOT EXISTS logins (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            org_id TEXT NOT NULL,
             username TEXT NOT NULL,
             device_id TEXT NOT NULL,
-            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (org_id, username)
+                REFERENCES users (org_id, username)
+                ON DELETE CASCADE
         )
         """
     )
@@ -38,21 +44,24 @@ def create_tables() -> None:
     conn.close()
 
 
-def get_user(username: str) -> Optional[sqlite3.Row]:
+def get_user(org_id: str, username: str) -> Optional[sqlite3.Row]:
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
+    cur.execute(
+        "SELECT * FROM users WHERE org_id = ? AND username = ?",
+        (org_id, username),
+    )
     user = cur.fetchone()
     conn.close()
     return user
 
 
-def add_login(username: str, device_id: str) -> None:
+def add_login(org_id: str, username: str, device_id: str) -> None:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO logins (username, device_id) VALUES (?, ?)",
-        (username, device_id),
+        "INSERT INTO logins (org_id, username, device_id) VALUES (?, ?, ?)",
+        (org_id, username, device_id),
     )
     conn.commit()
     conn.close()
