@@ -8,7 +8,7 @@ app = FastAPI(title="Tradex Backend")
 
 database.create_tables()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 
 class LoginRequest(BaseModel):
@@ -18,9 +18,14 @@ class LoginRequest(BaseModel):
     device_id: str
 
 
-class Token(BaseModel):
+class TokenPair(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 class UserContext(BaseModel):
@@ -28,7 +33,7 @@ class UserContext(BaseModel):
     username: str
 
 
-@app.post("/login", response_model=Token)
+@app.post("/auth/login", response_model=TokenPair)
 def login(data: LoginRequest):
     user = database.get_user(data.org_id, data.username)
     if not user or not auth.verify_password(data.password, user["hashed_password"]):
@@ -37,8 +42,33 @@ def login(data: LoginRequest):
             detail="Invalid credentials",
         )
     database.add_login(data.org_id, data.username, data.device_id)
-    access_token = auth.create_access_token({"sub": data.username, "org": data.org_id})
-    return Token(access_token=access_token)
+    payload = {"sub": data.username, "org": data.org_id}
+    access_token = auth.create_access_token(payload)
+    refresh_token = auth.create_refresh_token(payload)
+    return TokenPair(access_token=access_token, refresh_token=refresh_token)
+
+
+@app.post("/auth/refresh", response_model=TokenPair)
+def refresh(data: RefreshRequest):
+    payload = auth.decode_refresh_token(data.refresh_token)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    auth.revoke_token(payload["jti"], payload["exp"])
+    new_payload = {"sub": payload["sub"], "org": payload["org"]}
+    access_token = auth.create_access_token(new_payload)
+    refresh_token = auth.create_refresh_token(new_payload)
+    return TokenPair(access_token=access_token, refresh_token=refresh_token)
+
+
+@app.post("/auth/logout")
+def logout(data: RefreshRequest, token: str = Depends(oauth2_scheme)):
+    access_payload = auth.decode_access_token(token)
+    refresh_payload = auth.decode_refresh_token(data.refresh_token)
+    if access_payload is None or refresh_payload is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    auth.revoke_token(access_payload["jti"], access_payload["exp"])
+    auth.revoke_token(refresh_payload["jti"], refresh_payload["exp"])
+    return {"detail": "Logged out"}
 
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> UserContext:

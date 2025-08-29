@@ -30,6 +30,7 @@ def test_login_success_and_wrong_org_rejected():
     )
     token_model = main.login(payload)
     assert token_model.access_token
+    assert token_model.refresh_token
 
     payload_bad = LoginRequest(
         org_id="org2", username="alice", password="secret", device_id="dev1"
