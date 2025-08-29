@@ -47,10 +47,8 @@ import hashlib
 from datetime import datetime, date
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-import smtplib
-from email.message import EmailMessage
 from pydantic import BaseModel, Field, validator
 
 from sqlalchemy import (
@@ -68,10 +66,6 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 import qrcode
 from weasyprint import HTML
-
-from .observability import inc_invoice_verification
-from .security import hashed_path, run_isolated, content_disposition
-
 from lxml import etree
 
 # -----------------------------------------------------------------------------
@@ -83,7 +77,6 @@ VERIFACTU_ENVIAR = os.getenv("VERIFACTU_ENVIAR", "0") == "1"
 CERT_PATH = os.getenv("CERT_PATH")
 CERT_PASS = os.getenv("CERT_PASS")
 AEAT_WSDL_URL = os.getenv("AEAT_WSDL_URL")
-VERIFY_URL_BASE = os.getenv("VERIFY_URL_BASE", "http://localhost:8000")
 
 # Salidas
 OUTPUT_DIR = os.path.abspath(os.getenv("OUTPUT_DIR", "./salida"))
@@ -179,8 +172,6 @@ class InvoiceIn(BaseModel):
     receptor_nif: str
     receptor_nombre: str
 
-    email: Optional[str] = None
-
     tipo: str = "F1"
 
     items: List[ItemIn] = Field(..., min_items=1)
@@ -230,7 +221,7 @@ def calc_totals(items: List[ItemIn], tipo_iva: float) -> tuple[float, float, flo
 # (campos, orden, normalización y codificación) en:
 # "Algoritmo de cálculo de codificación de la huella o hash".
 
-def build_registro_alta(inv: Invoice, prev_hash: Optional[str], fecha_hora: Optional[str] = None):
+def build_registro_alta(inv: Invoice, prev_hash: Optional[str]):
     payload = {
         "NIFEmisor": inv.emisor_nif,
         "SerieFactura": inv.serie,
@@ -241,7 +232,7 @@ def build_registro_alta(inv: Invoice, prev_hash: Optional[str], fecha_hora: Opti
         "CuotaTotal": f"{inv.cuota_iva:.2f}",
         "ImporteTotal": f"{inv.total:.2f}",
         "HuellaAnterior": prev_hash or "",
-        "FechaHoraGeneracion": fecha_hora or datetime.now().isoformat(timespec="seconds"),
+        "FechaHoraGeneracion": datetime.now().isoformat(timespec="seconds"),
     }
     # Canonicalización simple → ajusta a la especificación oficial
     canon = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -250,7 +241,6 @@ def build_registro_alta(inv: Invoice, prev_hash: Optional[str], fecha_hora: Opti
 
 
 def generar_qr(inv: Invoice) -> str:
-
     """Genera el PNG del QR con la URL de cotejo.
 
     IMPORTANTE: Los parámetros exactos (nombres/orden/formato) los dicta el doc
@@ -262,22 +252,13 @@ def generar_qr(inv: Invoice) -> str:
         f"&serie={inv.serie}&num={inv.numero}"
         f"&fecha={inv.fecha.isoformat()}&total={inv.total:.2f}"
     )
-    identifier = f"{inv.serie}_{inv.numero}"
-    path = hashed_path(identifier, "qr", "png", OUTPUT_DIR)
-
-    def _render() -> None:
-        img = qrcode.make(url)
-        img.save(path)
-
-    try:
-        run_isolated(_render)
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="QR generation timed out")
-
+    path = os.path.join(OUTPUT_DIR, f"qr_{inv.serie}_{inv.numero}.png")
+    img = qrcode.make(url)
+    img.save(path)
     return path
 
 
-def html_factura(inv: Invoice, items: List[Item], timestamp: str) -> str:
+def html_factura(inv: Invoice, items: List[Item]) -> str:
     filas = "".join(
         f"<tr><td>{it.descripcion}</td><td style='text-align:right'>{it.cantidad:.2f}</td>"
         f"<td style='text-align:right'>{it.precio_unitario:.2f}</td>"
@@ -352,54 +333,18 @@ def html_factura(inv: Invoice, items: List[Item], timestamp: str) -> str:
   </div>
 
   <div class="small" style="margin-top:8px;">
-    Huella (hash) actual: {inv.hash_actual or ""}<br/>
-    Sello temporal: {timestamp}
+    Huella (hash) actual: {inv.hash_actual or ''}
   </div>
 </body>
 </html>
 """
 
 
-
 def render_pdf(inv: Invoice, items: List[Item]) -> str:
     html = html_factura(inv, items)
-    identifier = f"{inv.serie}_{inv.numero}"
-    path = hashed_path(identifier, "factura", "pdf", OUTPUT_DIR)
-
-    def _render() -> None:
-        HTML(string=html, base_url=os.getcwd()).write_pdf(path)
-
-    try:
-        run_isolated(_render)
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="PDF generation timed out")
-
+    path = os.path.join(OUTPUT_DIR, f"factura_{inv.serie}_{inv.numero}.pdf")
+    HTML(string=html, base_url=os.getcwd()).write_pdf(path)
     return path
-
-
-def send_email_with_pdf(pdf_path: str, recipient: str) -> None:
-    """Send the generated invoice PDF via SMTP."""
-    smtp_server = os.getenv("SMTP_SERVER", "localhost")
-    smtp_port = int(os.getenv("SMTP_PORT", "25"))
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    sender = os.getenv("SMTP_SENDER", smtp_user or "no-reply@example.com")
-
-    with open(pdf_path, "rb") as f:
-        data = f.read()
-
-    msg = EmailMessage()
-    msg["Subject"] = "Factura"
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg.set_content("Adjuntamos su factura en PDF.")
-    msg.add_attachment(data, maintype="application", subtype="pdf", filename=os.path.basename(pdf_path))
-
-    with smtplib.SMTP(smtp_server, smtp_port) as server:
-        if smtp_user and smtp_password:
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-        server.send_message(msg)
 
 
 def build_xml_registro(payload: dict, digest_hex: str) -> bytes:
@@ -440,12 +385,12 @@ def send_to_aeat(wsdl_url: str, signed_xml: bytes) -> dict:
 
 
 # -----------------------------------------------------------------------------
-# Router
+# FastAPI
 # -----------------------------------------------------------------------------
-router = APIRouter()
+app = FastAPI(title="VERI*FACTU MVP", version="0.1.0")
 
 
-@router.post("/", response_model=InvoiceOut)
+@app.post("/facturas", response_model=InvoiceOut)
 def crear_factura(datos: InvoiceIn):
     with SessionLocal() as db:
         numero = datos.numero or next_number(db, datos.serie)
@@ -478,12 +423,12 @@ def crear_factura(datos: InvoiceIn):
         # Hash encadenado y registro de alta
         prev = (
             db.query(Ledger)
+            .filter(Ledger.factura_id == inv.id)
             .order_by(Ledger.id.desc())
             .first()
         )
         prev_hash = prev.hash_actual if prev else None
         payload, digest = build_registro_alta(inv, prev_hash)
-        timestamp = payload["FechaHoraGeneracion"]
 
         ledger = Ledger(
             factura_id=inv.id,
@@ -498,13 +443,7 @@ def crear_factura(datos: InvoiceIn):
 
         # QR y PDF
         inv.qr_path = generar_qr(inv)
-        inv.pdf_path = render_pdf(inv, inv.items, timestamp)
-
-        if datos.email:
-            try:
-                send_email_with_pdf(inv.pdf_path, datos.email)
-            except Exception:
-                pass
+        inv.pdf_path = render_pdf(inv, inv.items)
 
         # XML, firma y (opcional) envío
         xml_reg = build_xml_registro(payload, digest)
@@ -535,7 +474,7 @@ def crear_factura(datos: InvoiceIn):
         return out
 
 
-@router.get("/{factura_id}", response_model=InvoiceOut)
+@app.get("/facturas/{factura_id}", response_model=InvoiceOut)
 def obtener_factura(factura_id: int):
     with SessionLocal() as db:
         inv = db.get(Invoice, factura_id)
@@ -559,39 +498,27 @@ def obtener_factura(factura_id: int):
         )
 
 
-@router.get("/{factura_id}/pdf")
+@app.get("/facturas/{factura_id}/pdf")
 def descargar_pdf(factura_id: int):
     with SessionLocal() as db:
         inv = db.get(Invoice, factura_id)
         if not inv or not inv.pdf_path or not os.path.exists(inv.pdf_path):
             raise HTTPException(status_code=404, detail="PDF no disponible")
-        fname = os.path.basename(inv.pdf_path)
-        headers = content_disposition(fname)
-        return FileResponse(inv.pdf_path, media_type="application/pdf", headers=headers)
+        return FileResponse(inv.pdf_path, media_type="application/pdf", filename=os.path.basename(inv.pdf_path))
 
 
-@router.get("/{factura_id}/qr")
+@app.get("/facturas/{factura_id}/qr")
 def descargar_qr(factura_id: int):
     with SessionLocal() as db:
         inv = db.get(Invoice, factura_id)
         if not inv or not inv.qr_path or not os.path.exists(inv.qr_path):
             raise HTTPException(status_code=404, detail="QR no disponible")
-
-        fname = os.path.basename(inv.qr_path)
-        headers = content_disposition(fname)
-   
-
         return FileResponse(inv.qr_path, media_type="image/png", filename=os.path.basename(inv.qr_path))
 
-@router.get("/{factura_id}/verify")
-def verificar_factura(factura_id: int):
-    """Recalculate hash to verify invoice integrity."""
-    with SessionLocal() as db:
-        inv = db.get(Invoice, factura_id)
-        if not inv:
-            raise HTTPException(status_code=404, detail="Factura no encontrada")
-        data = f"{inv.serie}{inv.numero}{inv.fecha}{inv.emisor_nif}{inv.receptor_nif}{inv.total}"
-        digest = hashlib.sha256(data.encode()).hexdigest()
-        verified = inv.hash_actual == digest
-        inc_invoice_verification()
-        return {"verified": verified}
+
+# -----------------------------------------------------------------------------
+# Datos de ejemplo rápidos (para pruebas con curl)
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
