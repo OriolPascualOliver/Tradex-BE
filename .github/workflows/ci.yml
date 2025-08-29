@@ -28,8 +28,8 @@ jobs:
 
       - name: Run SCA scan
         run: |
-          pip install pip-audit
-          pip-audit -r requirements.txt -f json -o sca-report.json
+          pip install safety
+          safety check -r requirements.txt --output json > sca-report.json
 
       - name: Generate SBOM
         run: |
