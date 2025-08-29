@@ -33,8 +33,8 @@ jobs:
 
       - name: Generate SBOM
         run: |
-          pip install cyclonedx-bom
-          cyclonedx-py -r requirements.txt -o sbom.json
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft dir:. -o cyclonedx-json > sbom.json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
